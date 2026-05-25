@@ -1225,7 +1225,8 @@ export interface paths {
         /**
          * 按需下载消息媒体
          * @description Baileys `downloadMediaMessage(msg, 'buffer')`。
-         *     **强烈建议 returnAs=url**，协议层缓存到对象存储后返回 URL，避免 NATS 总线传大文件。
+         *     协议层只负责按需下载 WhatsApp 媒体并返回 `base64` 或 `stream`。
+         *     长期存储、对象存储上传、CDN URL 和生命周期由业务层负责。
          */
         post: operations["messageDownload"];
         delete?: never;
@@ -3370,7 +3371,7 @@ export interface components {
             };
             /**
              * @description base64: 直接返回二进制（小文件，<5MB）
-             *     url: 协议层上传到对象存储后返回 URL（推荐，省 NATS 带宽）
+             *     url: 兼容字段；协议层默认不上传对象存储，未配置存储时返回 501
              *     stream: HTTP chunked 流（仅 HTTP 协议层支持）
              * @default base64
              * @enum {string}
@@ -3383,7 +3384,7 @@ export interface components {
             base64?: string | null;
             /**
              * Format: uri
-             * @description 协议层缓存到对象存储的 URL（24h 有效）
+             * @description 兼容字段；协议层默认不上传对象存储，通常为 null
              */
             url?: string | null;
         };

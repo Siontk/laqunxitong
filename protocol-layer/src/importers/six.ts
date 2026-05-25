@@ -27,7 +27,7 @@ export function convertSixToBaileys(input: SixLoginInput): ConvertOutput {
   ] as const
 
   for (const k of required) {
-    const v = (input as Record<string, unknown>)[k]
+    const v = (input as unknown as Record<string, unknown>)[k]
     if (v === undefined || v === null || v === '') missing.push(k)
     else present.push(k)
   }

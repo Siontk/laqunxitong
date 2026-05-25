@@ -9,15 +9,23 @@ services:
     volumes:
       - redis-data:/data
 
-  nats:
-    image: nats:2.10-alpine
-    container_name: unsea-nats
-    command: ["-js", "-m", "8222"]
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: unsea-kafka
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      - "9092:9092"
     volumes:
-      - nats-data:/data
+      - kafka-data:/bitnami/kafka
+    environment:
+      KAFKA_ENABLE_KRAFT: "yes"
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: "broker,controller"
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
 
   postgres:
     image: postgres:16-alpine
@@ -56,26 +64,27 @@ services:
 
   protocol-master:
     build:
-      context: ../
-      dockerfile: deploy/Dockerfile
+      context: ../../
+      dockerfile: protocol-layer/deploy/Dockerfile
     container_name: unsea-protocol-master
     environment:
       WORKER_ROLE: master
       NODE_ID: master-1
       WORKER_ID: master-1
       REDIS_URL: redis://redis:6379
-      NATS_SERVERS: nats://nats:4222
+      EVENT_BACKEND: kafka
+      KAFKA_BROKERS: kafka:9092
       PG_ENABLED: "true"
       PG_CONNECTION_STRING: postgres://unsea:unsea@postgres:5432/unsea
       LOG_PRETTY: "true"
       LOG_LEVEL: info
-    depends_on: [redis, nats, postgres]
+    depends_on: [redis, kafka, postgres]
     ports: ["8080:8080"]
 
   protocol-worker-1:
     build:
-      context: ../
-      dockerfile: deploy/Dockerfile
+      context: ../../
+      dockerfile: protocol-layer/deploy/Dockerfile
     container_name: unsea-protocol-worker-1
     environment:
       WORKER_ROLE: worker
@@ -84,18 +93,19 @@ services:
       HTTP_PORT: "8081"
       PUBLIC_ENDPOINT: http://localhost:8081
       REDIS_URL: redis://redis:6379
-      NATS_SERVERS: nats://nats:4222
+      EVENT_BACKEND: kafka
+      KAFKA_BROKERS: kafka:9092
       PG_ENABLED: "true"
       PG_CONNECTION_STRING: postgres://unsea:unsea@postgres:5432/unsea
       MAX_ACCOUNTS_PER_WORKER: "500"
       LOG_PRETTY: "true"
-    depends_on: [redis, nats, postgres, protocol-master]
+    depends_on: [redis, kafka, postgres, protocol-master]
     ports: ["8081:8081"]
 
   protocol-worker-2:
     build:
-      context: ../
-      dockerfile: deploy/Dockerfile
+      context: ../../
+      dockerfile: protocol-layer/deploy/Dockerfile
     container_name: unsea-protocol-worker-2
     environment:
       WORKER_ROLE: worker
@@ -104,18 +114,19 @@ services:
       HTTP_PORT: "8082"
       PUBLIC_ENDPOINT: http://localhost:8082
       REDIS_URL: redis://redis:6379
-      NATS_SERVERS: nats://nats:4222
+      EVENT_BACKEND: kafka
+      KAFKA_BROKERS: kafka:9092
       PG_ENABLED: "true"
       PG_CONNECTION_STRING: postgres://unsea:unsea@postgres:5432/unsea
       MAX_ACCOUNTS_PER_WORKER: "500"
       LOG_PRETTY: "true"
-    depends_on: [redis, nats, postgres, protocol-master]
+    depends_on: [redis, kafka, postgres, protocol-master]
     ports: ["8082:8082"]
 
   protocol-worker-3:
     build:
-      context: ../
-      dockerfile: deploy/Dockerfile
+      context: ../../
+      dockerfile: protocol-layer/deploy/Dockerfile
     container_name: unsea-protocol-worker-3
     environment:
       WORKER_ROLE: worker
@@ -124,18 +135,19 @@ services:
       HTTP_PORT: "8083"
       PUBLIC_ENDPOINT: http://localhost:8083
       REDIS_URL: redis://redis:6379
-      NATS_SERVERS: nats://nats:4222
+      EVENT_BACKEND: kafka
+      KAFKA_BROKERS: kafka:9092
       PG_ENABLED: "true"
       PG_CONNECTION_STRING: postgres://unsea:unsea@postgres:5432/unsea
       MAX_ACCOUNTS_PER_WORKER: "500"
       LOG_PRETTY: "true"
-    depends_on: [redis, nats, postgres, protocol-master]
+    depends_on: [redis, kafka, postgres, protocol-master]
     ports: ["8083:8083"]
 
   protocol-worker-4:
     build:
-      context: ../
-      dockerfile: deploy/Dockerfile
+      context: ../../
+      dockerfile: protocol-layer/deploy/Dockerfile
     container_name: unsea-protocol-worker-4
     environment:
       WORKER_ROLE: worker
@@ -144,17 +156,18 @@ services:
       HTTP_PORT: "8084"
       PUBLIC_ENDPOINT: http://localhost:8084
       REDIS_URL: redis://redis:6379
-      NATS_SERVERS: nats://nats:4222
+      EVENT_BACKEND: kafka
+      KAFKA_BROKERS: kafka:9092
       PG_ENABLED: "true"
       PG_CONNECTION_STRING: postgres://unsea:unsea@postgres:5432/unsea
       MAX_ACCOUNTS_PER_WORKER: "500"
       LOG_PRETTY: "true"
-    depends_on: [redis, nats, postgres, protocol-master]
+    depends_on: [redis, kafka, postgres, protocol-master]
     ports: ["8084:8084"]
 
 volumes:
   redis-data:
-  nats-data:
+  kafka-data:
   pg-data:
   prom-data:
   grafana-data:

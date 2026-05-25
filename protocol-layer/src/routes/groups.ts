@@ -24,7 +24,13 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     try {
       const created = await sock.groupCreate(subject, participants)
       ctx.metrics.groupCreateTotal.inc({ result: 'success' })
-      reply.send({ groupJid: created.id, results: { groupJid: created.id, results: created.participants?.map(p => ({ jid: p.jid, status: p.error ?? '200' })) ?? [] } })
+      reply.send({
+        groupJid: created.id,
+        results: {
+          groupJid: created.id,
+          results: created.participants?.map(p => ({ jid: p.id, status: '200' })) ?? []
+        }
+      })
     } catch (err) {
       ctx.metrics.groupCreateTotal.inc({ result: 'error' })
       throw err

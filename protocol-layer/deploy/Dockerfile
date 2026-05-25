@@ -1,10 +1,10 @@
 FROM node:20-bookworm-slim AS builder
 
 WORKDIR /app
-COPY package.json tsconfig.json ./
-COPY ../openapi /opt/openapi
+COPY protocol-layer/package.json protocol-layer/tsconfig.json ./
+COPY openapi /opt/openapi
 # 拷源码
-COPY src ./src
+COPY protocol-layer/src ./src
 
 RUN npm install --no-audit --no-fund
 RUN npm run build
@@ -19,7 +19,7 @@ COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /opt/openapi /opt/openapi
-COPY deploy/entrypoint.sh ./entrypoint.sh
+COPY protocol-layer/deploy/entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 
 ENV NODE_ENV=prod

@@ -1,8 +1,7 @@
 /**
- * NATS subject 常量表。
+ * 事件类型与 Kafka topic 路由。
  *
- * 规范：unsea.v1.events.{event_name}
- * 19 事件按 § 3.9 / 附录 A.12 定义，对应 OpenAPI webhooks 部分。
+ * Kafka message key 固定用 accountId，保证同账号事件落到同一 partition。
  */
 
 export const EVENT_TYPES = [
@@ -32,7 +31,7 @@ export const EVENT_TYPES = [
 
 export type EventType = (typeof EVENT_TYPES)[number]
 
-/** 必须可靠投递的事件（走 JetStream + ack） */
+/** 必须可靠投递的事件（Kafka producer ack=all） */
 export const CRITICAL_EVENTS = new Set<EventType>([
   'account.state_changed',
   'account.need_reauth',
@@ -51,7 +50,7 @@ export const CRITICAL_EVENTS = new Set<EventType>([
   'group.participant_changed'
 ])
 
-/** 容忍丢失的事件（普通 NATS 即可） */
+/** 可降级事件；当前仍写 Kafka，业务侧可按需忽略或降低保留时间 */
 export const BEST_EFFORT_EVENTS = new Set<EventType>([
   'account.heartbeat',
   'account.online_changed',
@@ -62,6 +61,12 @@ export const BEST_EFFORT_EVENTS = new Set<EventType>([
   'group.metadata_updated'
 ])
 
-export function subjectFor(prefix: string, evt: EventType): string {
-  return `${prefix}.${evt}`
+export type EventTopicKind = 'account' | 'owner' | 'message' | 'group' | 'pairing'
+
+export function topicKindFor(evt: EventType): EventTopicKind {
+  if (evt.startsWith('account.owner_')) return 'owner'
+  if (evt.startsWith('message.')) return 'message'
+  if (evt.startsWith('group.')) return 'group'
+  if (evt.startsWith('pairing.') || evt.startsWith('qr.')) return 'pairing'
+  return 'account'
 }

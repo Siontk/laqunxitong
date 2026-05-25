@@ -113,7 +113,6 @@ export function createRedis(url: string, db: number = 0): RedisClient {
         const [host, port] = s.split(':')
         return { host: host ?? 'localhost', port: Number(port ?? 6379) }
       })
-    // @ts-expect-error ioredis Cluster constructor
     return new Redis.Cluster(nodes, { redisOptions: { db } })
   }
   return new Redis(url, { db })

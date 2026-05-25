@@ -1,7 +1,7 @@
 /**
- * Event Bridge — Baileys 内部事件 → NATS 业务事件转换。
+ * Event Bridge — Baileys 内部事件 → Kafka 业务事件转换。
  *
- * 19 个 NATS 事件全部从这里发出（§ 3.9 / 附录 A.12）：
+ * 业务事件全部从这里发出（§ 3.9 / 附录 A.12）：
  *   account.state_changed / heartbeat / online_changed / stale_detected
  *   account.need_reauth / type_detected / proxy_failed / proxy_rotated
  *   account.rate_limited / restricted / new_chat_capping
@@ -65,7 +65,8 @@ export function attachEventBridge(
       if (!msg.key.remoteJid) continue
       const fromJid = msg.key.remoteJid
       const isGroup = fromJid.endsWith('@g.us')
-      const type = inferMessageType(msg.message ?? {})
+      const content = (msg.message ?? {}) as unknown as Record<string, unknown>
+      const type = inferMessageType(content)
 
       publisher.publish(
         'message.received',
@@ -76,8 +77,8 @@ export function attachEventBridge(
           pushName: msg.pushName ?? null,
           isGroup,
           messageType: type,
-          content: msg.message ?? {},
-          hasMedia: hasMediaContent(msg.message ?? {}),
+          content,
+          hasMedia: hasMediaContent(content),
           receivedAt: new Date().toISOString()
         },
         ctx.getEvidence()

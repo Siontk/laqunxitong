@@ -6,7 +6,7 @@
 |---|---|---|
 | Node.js | ≥ 20 LTS | 协议层运行时 |
 | Redis | ≥ 7 | L2 keys + Registry + 令牌桶 |
-| NATS | ≥ 2.10 + JetStream | 事件总线（关键事件持久化） |
+| Kafka / AWS MSK | Kafka 3.x | 事件总线（按 accountId 分区、可重放） |
 | PostgreSQL | ≥ 16 | L3 creds 持久化（可选，建议生产开启） |
 | Prometheus + Grafana | latest | 可观测性 |
 
@@ -15,7 +15,7 @@
 ```bash
 # 启动依赖
 cd protocol-layer
-docker compose -f deploy/docker-compose.yml up -d redis nats postgres prometheus grafana
+docker compose -f deploy/docker-compose.yml up -d redis kafka postgres prometheus grafana
 
 # 安装 + 启动 standalone（master+worker 同进程）
 npm install
@@ -60,7 +60,14 @@ BAILEYS_SYNC_HISTORY=false
 BAILEYS_INIT_QUERIES=false
 BAILEYS_MARK_ONLINE=false
 BAILEYS_EMIT_OWN_EVENTS=false
-NATS_DLQ_DIR=/tmp/unsea-event-dlq
+EVENT_BACKEND=kafka
+EVENT_DLQ_DIR=/tmp/unsea-event-dlq
+KAFKA_BROKERS=kafka:9092
+KAFKA_TOPIC_ACCOUNT=protocol.account.events.v1
+KAFKA_TOPIC_OWNER=protocol.owner.events.v1
+KAFKA_TOPIC_MESSAGE=protocol.message.events.v1
+KAFKA_TOPIC_GROUP=protocol.group.events.v1
+KAFKA_TOPIC_PAIRING=protocol.pairing.events.v1
 API_KEYS=replace-with-prod-key
 ```
 
@@ -74,7 +81,7 @@ kind: Secret
 metadata: { name: protocol-secrets }
 stringData:
   redis_url: "redis://redis-master.redis.svc:6379"
-  nats_servers: "nats://nats.nats.svc:4222"
+  kafka_brokers: "b-1.protocol-msk.kafka.ap-southeast-1.amazonaws.com:9094,b-2.protocol-msk.kafka.ap-southeast-1.amazonaws.com:9094"
   pg_url: "postgres://unsea:***@postgres.db.svc:5432/unsea"
 ```
 
@@ -107,8 +114,13 @@ Worker 受 SIGTERM 时优雅退出（注销 Registry + 关 ws），Registry mast
 | `HTTP_PORT` | 8080 | HTTP 端口 |
 | `API_KEYS` | 空 | 可选，逗号分隔；配置后所有 `/v1/*` 要求 `x-api-key` 或 `Authorization: Bearer` |
 | `REDIS_URL` | redis://localhost:6379 | 含 cluster（逗号分隔多节点） |
-| `NATS_SERVERS` | nats://localhost:4222 | 含集群（逗号分隔） |
-| `NATS_DLQ_DIR` | /tmp/unsea-event-dlq | 事件发布失败后的本地 DLQ jsonl 目录，生产建议挂持久卷 |
+| `EVENT_BACKEND` | kafka | 事件后端，当前生产只支持 kafka |
+| `EVENT_DLQ_DIR` | /tmp/unsea-event-dlq | 事件发布失败后的本地 DLQ jsonl 目录，生产建议挂持久卷 |
+| `KAFKA_BROKERS` | localhost:9092 | Kafka/MSK broker，逗号分隔 |
+| `KAFKA_CLIENT_ID` | protocol-layer | Kafka client id |
+| `KAFKA_SSL` | false | MSK TLS listener 设为 true |
+| `KAFKA_USERNAME` / `KAFKA_PASSWORD` | 空 | MSK SASL/SCRAM 时配置 |
+| `KAFKA_SASL_MECHANISM` | scram-sha-512 | plain / scram-sha-256 / scram-sha-512 |
 | `PG_ENABLED` | false | 是否启用 L3 |
 | `MAX_ACCOUNTS_PER_WORKER` | 400 | 单 worker 承载上限；4C8G 单机测试设为 500，4 worker 合计 2000 |
 | `MAX_OLD_SPACE_MB` | 1280 | V8 堆上限 |

@@ -8,7 +8,7 @@
 ```
 下发任务前  ──> GET /v1/accounts/{id}/usability       看 canCreateGroup / canSendNewChat / blockedReason
 找正确 worker ──> GET /v1/accounts/resolve/{id}        拿 ownerEndpoint，缓存 30-60s
-订阅事件   ──> NATS subject "unsea.v1.events.*"      消费 19 个事件类型
+订阅事件   ──> Kafka topics protocol.*.events.v1    key=accountId，消费账号/消息/群/owner 事件
 ```
 
 错误码：
@@ -307,7 +307,7 @@ POST /v1/groups/{jid}/leave                → 退群
 "image": { "base64": "...", "mimetype": "image/jpeg" }
 ```
 
-**业务侧约定**：能用 url 就不要 base64（base64 让 NATS 和 HTTP body 膨胀 33%）。
+**业务侧约定**：能用 url 就不要 base64（base64 让 Kafka 和 HTTP body 膨胀 33%）。
 
 ### 7.2 媒体下载
 
@@ -400,9 +400,17 @@ POST /v1/accounts/export/batch                # 批量
 
 ---
 
-## 13. 事件订阅（NATS）
+## 13. 事件订阅（Kafka）
 
-NATS subject: `unsea.v1.events.{event}`
+Kafka message key 固定为 `accountId`，同账号事件在同一 partition 内有序。
+
+| Topic | 事件 |
+|---|---|
+| `protocol.account.events.v1` | account.* 状态/风控事件 |
+| `protocol.owner.events.v1` | account.owner_assigned / changed / unassigned |
+| `protocol.message.events.v1` | message.received / message.ack |
+| `protocol.group.events.v1` | group.participant_changed / metadata_updated |
+| `protocol.pairing.events.v1` | pairing.* / qr.* |
 
 | 事件 | 业务侧用法 |
 |---|---|

@@ -9,7 +9,7 @@
  *   - 接 Baileys connection.update / creds.update
  *   - 翻译 DisconnectReason 为 semantic
  *   - 委托 ReconnectController 做重连
- *   - 派发事件到 NATS
+ *   - 派发事件到 Kafka
  *   - 提供 sock 给 routes 调用（业务接口走这里取 sock）
  */
 
@@ -381,7 +381,7 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
     ctx.wsOpenedAt = Date.now()
     this.publishStateChange(ctx, 'VERIFYING', 'ws_open')
 
-    // 接 Baileys 内部事件 → NATS
+    // 接 Baileys 内部事件 → Kafka
     ctx.detachEventBridge = attachEventBridge(
       sock,
       {
@@ -566,3 +566,4 @@ function reasonBucket(reason: string): string {
   if (reason.includes('logout')) return 'logout'
   if (reason.includes('manual')) return 'manual'
   return 'other'
+}

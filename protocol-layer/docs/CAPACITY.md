@@ -25,13 +25,13 @@
 
 > 百万级分片思路见 [`MILLION-SCALE-SHARDING.md`](MILLION-SCALE-SHARDING.md)。
 
-| 阶段 | concurrent | 节点数 (4C8G) | Redis | NATS | PG |
+| 阶段 | concurrent | 节点数 (4C8G) | Redis | Kafka | PG |
 |---|---|---|---|---|---|
-| Phase 0 | ≤ 1k | 1 | 单实例 | 单实例 | 单实例 |
-| Phase 1 | 1 万 | 5-7 | 3 主 3 从 cluster | 3 节点 | 主从 |
-| Phase 2 | 10 万 | 50-70 | **分 cluster**：keys / Registry / 限流 | NATS supercluster | 分库分表 |
-| Phase 3 | 50 万 | 250-350 多 region | 每 region 一套 keys cluster | JetStream + MirrorMaker | PG cluster + 异步复制 |
-| Phase 4 | 100 万 | 600-700 多 region IDC | Redis enterprise / KeyDB cluster | Kafka + JetStream 混合 | PG 分片 + 对象存储归档 |
+| Phase 0 | ≤ 1k | 1 | 单实例 | 单 broker / MSK Serverless | 单实例 |
+| Phase 1 | 1 万 | 5-7 | 3 主 3 从 cluster | 3 broker | 主从 |
+| Phase 2 | 10 万 | 50-70 | **分 cluster**：keys / Registry / 限流 | MSK Provisioned，多 topic 分区 | 分库分表 |
+| Phase 3 | 50 万 | 250-350 多 region | 每 region 一套 keys cluster | MSK Provisioned + 跨区复制 | PG cluster + 异步复制 |
+| Phase 4 | 100 万 | 600-700 多 region IDC | Redis enterprise / KeyDB cluster | 多 Kafka 集群 + MirrorMaker | PG 分片 + 对象存储归档 |
 
 ## 重连风暴
 

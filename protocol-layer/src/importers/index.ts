@@ -60,4 +60,4 @@ export function importCredentials(req: ImportRequest): ConvertOutput {
 }
 
 export { convertParamsToBaileys, convertSixToBaileys, convertLegacyJsonToBaileys }
-export type { ConvertOutput, ParamsLoginInput, SixLoginInput, LegacyJsonLoginInput, ImportFormat }
+export type { ConvertOutput, ParamsLoginInput, SixLoginInput, LegacyJsonLoginInput }

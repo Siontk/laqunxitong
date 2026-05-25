@@ -155,7 +155,7 @@ info:
 
     1. **下发任务前**：调 `GET /v1/accounts/{id}/usability`，看 `canCreateGroup` / `canAddToGroup` 是否 true
     2. **找正确的 worker**：调 `GET /v1/accounts/resolve/{id}` 拿 `ownerEndpoint`，业务侧缓存 30-60s
-    3. **订阅事件**：NATS subject `unsea.v1.events.*`，业务侧消费 19 个事件类型
+    3. **订阅事件**：Kafka topics `protocol.*.events.v1`，message key 为 accountId，业务侧消费事件类型
 
     ## 错误码
 
@@ -171,7 +171,14 @@ info:
 
     ## 事件订阅
 
-    NATS subject: `unsea.v1.events.{event}`。关键事件走 JetStream + ack，普通走 best-effort。
+    Kafka topics:
+    - `protocol.account.events.v1`
+    - `protocol.owner.events.v1`
+    - `protocol.message.events.v1`
+    - `protocol.group.events.v1`
+    - `protocol.pairing.events.v1`
+
+    Kafka message key 固定为 accountId，确保同账号事件分区内有序。
     详见 webhooks 部分（OpenAPI Swagger UI 底部）和 [BUSINESS-INTEGRATION.md](https://github.com/your-org/unsea/blob/main/protocol-layer/docs/BUSINESS-INTEGRATION.md)。
 servers:
   - url: http://protocol.unsea.local:8080
@@ -3297,7 +3304,7 @@ components:
         nextCursor: { type: string, nullable: true }
 
 
-# ──────────────────── webhooks（事件订阅，NATS subject: unsea.v1.events.*） ────────────────────
+# ──────────────────── webhooks（事件 payload，Kafka topic: protocol.*.events.v1） ────────────────────
 webhooks:
   account.state_changed:
     post:

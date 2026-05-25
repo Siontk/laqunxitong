@@ -14,12 +14,12 @@
     "declaration": true,
     "sourceMap": true,
     "outDir": "./dist",
-    "rootDir": "./src",
+    "rootDir": "..",
     "baseUrl": "./src",
     "paths": {
       "@/*": ["./*"]
     }
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "../openapi/generated/**/*"],
   "exclude": ["dist", "node_modules", "**/*.test.ts", "**/__tests__/**"]
 }

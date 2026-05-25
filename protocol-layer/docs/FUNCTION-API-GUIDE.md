@@ -1033,11 +1033,17 @@ POST /v1/admin/unassign
 
 ## 15. 事件
 
-功能层应消费 NATS：
+功能层应消费 Kafka：
 
 ```text
-unsea.v1.events.>
+protocol.account.events.v1
+protocol.owner.events.v1
+protocol.message.events.v1
+protocol.group.events.v1
+protocol.pairing.events.v1
 ```
+
+Kafka message key 为 `accountId`，同账号事件分区内有序。
 
 重点事件：
 

@@ -172,7 +172,7 @@ export function createMetrics(config: Config): Metrics {
 
   const eventsPublishedTotal = new Counter({
     name: 'unsea_events_published_total',
-    help: 'Events published to NATS',
+    help: 'Events published to Kafka',
     labelNames: ['event'],
     registers: [registry]
   })

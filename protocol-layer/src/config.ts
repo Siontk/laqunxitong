@@ -29,12 +29,26 @@ const ConfigSchema = z.object({
     openapiSpecPath: z.string().default('../openapi/protocol-v1.yaml')
   }),
 
-  // ── NATS ──
-  nats: z.object({
-    servers: z.string().default('nats://localhost:4222'),
-    streamName: z.string().default('UNSEA_EVENTS'),
-    eventSubjectPrefix: z.string().default('unsea.v1.events'),
+  // ── 事件总线（生产默认 Kafka / AWS MSK）──
+  events: z.object({
+    backend: z.enum(['kafka']).default('kafka'),
     dlqDir: z.string().default('/tmp/unsea-event-dlq')
+  }),
+
+  // ── Kafka / AWS MSK ──
+  kafka: z.object({
+    brokers: z.string().default('localhost:9092'),
+    clientId: z.string().default('protocol-layer'),
+    ssl: z.coerce.boolean().default(false),
+    username: z.string().optional(),
+    password: z.string().optional(),
+    saslMechanism: z.enum(['plain', 'scram-sha-256', 'scram-sha-512']).default('scram-sha-512'),
+    topicAccount: z.string().default('protocol.account.events.v1'),
+    topicOwner: z.string().default('protocol.owner.events.v1'),
+    topicMessage: z.string().default('protocol.message.events.v1'),
+    topicGroup: z.string().default('protocol.group.events.v1'),
+    topicPairing: z.string().default('protocol.pairing.events.v1'),
+    topicDlq: z.string().default('protocol.dlq.v1')
   }),
 
   // ── Redis（L2 keys + Registry + 令牌桶）──
@@ -119,11 +133,23 @@ export function loadConfig(): Config {
       apiKeys: process.env.API_KEYS,
       openapiSpecPath: process.env.OPENAPI_SPEC_PATH
     },
-    nats: {
-      servers: process.env.NATS_SERVERS,
-      streamName: process.env.NATS_STREAM,
-      eventSubjectPrefix: process.env.NATS_SUBJECT_PREFIX,
-      dlqDir: process.env.NATS_DLQ_DIR
+    events: {
+      backend: process.env.EVENT_BACKEND as 'kafka' | undefined,
+      dlqDir: process.env.EVENT_DLQ_DIR
+    },
+    kafka: {
+      brokers: process.env.KAFKA_BROKERS,
+      clientId: process.env.KAFKA_CLIENT_ID,
+      ssl: process.env.KAFKA_SSL,
+      username: process.env.KAFKA_USERNAME,
+      password: process.env.KAFKA_PASSWORD,
+      saslMechanism: process.env.KAFKA_SASL_MECHANISM as 'plain' | 'scram-sha-256' | 'scram-sha-512' | undefined,
+      topicAccount: process.env.KAFKA_TOPIC_ACCOUNT,
+      topicOwner: process.env.KAFKA_TOPIC_OWNER,
+      topicMessage: process.env.KAFKA_TOPIC_MESSAGE,
+      topicGroup: process.env.KAFKA_TOPIC_GROUP,
+      topicPairing: process.env.KAFKA_TOPIC_PAIRING,
+      topicDlq: process.env.KAFKA_TOPIC_DLQ
     },
     redis: {
       url: process.env.REDIS_URL,

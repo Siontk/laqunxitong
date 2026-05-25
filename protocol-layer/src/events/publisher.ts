@@ -1,25 +1,20 @@
 /**
- * 事件发布器。
+ * Kafka 事件发布器。
  *
  * 设计原则：
- *   1. 关键事件走 JetStream + publish ack（保证至少一次）
- *   2. 容忍丢失走普通 publish
- *   3. 每条事件强制带 evidence + occurredAt + workerId（业务层乱序检测）
- *   4. 失败重试 3 次，仍失败写入本地 DLQ 文件 + Prometheus 报警
+ *   1. Kafka message key 固定用 accountId，保证同账号事件分区内有序。
+ *   2. 事件 envelope 不变，功能层只需要从 Kafka topic 消费。
+ *   3. 失败重试 3 次，仍失败写入本地 DLQ 文件并报警。
  */
 
-import { type JetStreamClient, type NatsConnection, StringCodec, connect, type JetStreamManager } from 'nats'
+import { Kafka, logLevel, type Producer, type SASLOptions } from 'kafkajs'
 import { mkdir, appendFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import type { Config } from '../config.js'
 import type { Metrics } from '../observability/metrics.js'
 import type { Logger } from '../observability/logger.js'
-import {
-  type EventType,
-  CRITICAL_EVENTS,
-  subjectFor
-} from './subjects.js'
+import { type EventType, topicKindFor } from './subjects.js'
 
 export interface EventEnvelope<TData = Record<string, unknown>> {
   event: EventType
@@ -42,78 +37,105 @@ export async function createEventPublisher(
   metrics: Metrics,
   logger: Logger
 ): Promise<EventPublisher> {
-  let nc: NatsConnection | null = null
-  let js: JetStreamClient | null = null
-  let jsm: JetStreamManager | null = null
+  let producer: Producer | null = null
   let connected = false
-  const sc = StringCodec()
 
   async function writeDlq(envelope: EventEnvelope, err: unknown): Promise<void> {
     const day = new Date().toISOString().slice(0, 10)
-    await mkdir(config.nats.dlqDir, { recursive: true })
+    await mkdir(config.events.dlqDir, { recursive: true })
     const line = JSON.stringify({
       failedAt: new Date().toISOString(),
+      backend: config.events.backend,
       workerId: config.workerId,
       error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : String(err),
       envelope
     })
-    await appendFile(join(config.nats.dlqDir, `${day}.jsonl`), `${line}\n`, 'utf8')
+    await appendFile(join(config.events.dlqDir, `${day}.jsonl`), `${line}\n`, 'utf8')
   }
 
-  async function connectNats(): Promise<void> {
-    nc = await connect({
-      servers: config.nats.servers.split(',').map(s => s.trim()),
-      reconnect: true,
-      maxReconnectAttempts: -1,
-      pingInterval: 20_000,
-      name: `${config.nodeId}/${config.workerId}`
+  function kafkaSasl(): SASLOptions | undefined {
+    if (!config.kafka.username || !config.kafka.password) return undefined
+    return {
+      mechanism: config.kafka.saslMechanism,
+      username: config.kafka.username,
+      password: config.kafka.password
+    } as SASLOptions
+  }
+
+  function topicFor(evt: EventType): string {
+    const kind = topicKindFor(evt)
+    if (kind === 'owner') return config.kafka.topicOwner
+    if (kind === 'message') return config.kafka.topicMessage
+    if (kind === 'group') return config.kafka.topicGroup
+    if (kind === 'pairing') return config.kafka.topicPairing
+    return config.kafka.topicAccount
+  }
+
+  async function connectKafka(): Promise<void> {
+    const kafka = new Kafka({
+      clientId: config.kafka.clientId,
+      brokers: config.kafka.brokers.split(',').map(s => s.trim()).filter(Boolean),
+      ssl: config.kafka.ssl,
+      sasl: kafkaSasl(),
+      logLevel: logLevel.NOTHING
     })
-    js = nc.jetstream()
-    jsm = await nc.jetstreamManager()
-    connected = true
-
-    // 确保流存在
-    try {
-      await jsm.streams.info(config.nats.streamName)
-    } catch (_e) {
-      await jsm.streams.add({
-        name: config.nats.streamName,
-        subjects: [`${config.nats.eventSubjectPrefix}.>`],
-        retention: 'limits' as 'limits' | 'workqueue' | 'interest',
-        max_age: 7 * 24 * 60 * 60 * 1_000_000_000, // 7 天 ns
-        storage: 'file' as 'file' | 'memory'
-      })
-      logger.info({ stream: config.nats.streamName }, 'JetStream stream created')
-    }
-
-    // 断线监控
-    ;(async () => {
-      for await (const status of nc!.status()) {
-        logger.warn({ status: status.type }, 'NATS connection status changed')
-        if (status.type === 'disconnect') connected = false
-        if (status.type === 'reconnect') connected = true
+    producer = kafka.producer({
+      allowAutoTopicCreation: false,
+      idempotent: true,
+      maxInFlightRequests: 1,
+      retry: {
+        retries: 5,
+        initialRetryTime: 300
       }
-    })()
+    })
+    await producer.connect()
+    connected = true
+    logger.info(
+      {
+        backend: config.events.backend,
+        brokers: config.kafka.brokers,
+        topics: {
+          account: config.kafka.topicAccount,
+          owner: config.kafka.topicOwner,
+          message: config.kafka.topicMessage,
+          group: config.kafka.topicGroup,
+          pairing: config.kafka.topicPairing
+        }
+      },
+      'kafka event publisher connected'
+    )
   }
 
-  await connectNats().catch(err => {
-    logger.error({ err }, 'failed initial NATS connect — will retry on publish')
+  await connectKafka().catch(err => {
+    connected = false
+    logger.error({ err, brokers: config.kafka.brokers }, 'failed initial Kafka connect — will retry on publish')
   })
 
-  async function publishOnce(envelope: EventEnvelope, critical: boolean): Promise<void> {
-    if (!nc || !connected) {
-      throw new Error('NATS not connected')
-    }
-    const subject = subjectFor(config.nats.eventSubjectPrefix, envelope.event)
-    const payload = sc.encode(JSON.stringify(envelope))
+  async function ensureConnected(): Promise<Producer> {
+    if (producer && connected) return producer
+    await connectKafka()
+    if (!producer || !connected) throw new Error('Kafka not connected')
+    return producer
+  }
 
-    if (critical && js) {
-      await js.publish(subject, payload, {
-        msgID: `${envelope.accountId}-${envelope.event}-${envelope.occurredAt}`
-      })
-    } else {
-      nc.publish(subject, payload)
-    }
+  async function publishOnce(envelope: EventEnvelope): Promise<void> {
+    const p = await ensureConnected()
+    await p.send({
+      topic: topicFor(envelope.event),
+      acks: -1,
+      messages: [
+        {
+          key: envelope.accountId,
+          value: JSON.stringify(envelope),
+          headers: {
+            event: envelope.event,
+            version: envelope.version,
+            workerId: envelope.workerId,
+            occurredAt: envelope.occurredAt
+          }
+        }
+      ]
+    })
   }
 
   async function publish<TData>(
@@ -131,24 +153,29 @@ export async function createEventPublisher(
       evidence,
       data: data as Record<string, unknown>
     }
-    const critical = CRITICAL_EVENTS.has(evt)
+
     let lastErr: unknown
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        await publishOnce(envelope, critical)
+        await publishOnce(envelope)
         metrics.eventsPublishedTotal.inc({ event: evt })
         return
       } catch (err) {
         lastErr = err
+        connected = false
         metrics.eventsPublishErrorsTotal.inc({ event: evt, reason: 'publish_failed' })
-        logger.warn({ err, evt, attempt, accountId }, 'event publish attempt failed')
-        await new Promise(r => setTimeout(r, attempt * 200))
+        logger.warn({ err, evt, attempt, accountId, topic: topicFor(evt) }, 'event publish attempt failed')
+        await new Promise(r => setTimeout(r, attempt * 300))
       }
     }
+
     metrics.eventsPublishErrorsTotal.inc({ event: evt, reason: 'dlq' })
     try {
       await writeDlq(envelope, lastErr)
-      logger.error({ envelope, err: lastErr, dlqDir: config.nats.dlqDir }, 'event publish exhausted — written to DLQ')
+      logger.error(
+        { envelope, err: lastErr, dlqDir: config.events.dlqDir },
+        'event publish exhausted — written to DLQ'
+      )
     } catch (dlqErr) {
       metrics.eventsPublishErrorsTotal.inc({ event: evt, reason: 'dlq_write_failed' })
       logger.error({ envelope, err: lastErr, dlqErr }, 'event publish exhausted — DLQ write failed')
@@ -159,7 +186,8 @@ export async function createEventPublisher(
     publish,
     isReady: () => connected,
     close: async () => {
-      if (nc) await nc.drain()
+      if (producer) await producer.disconnect()
+      connected = false
     }
   }
 }

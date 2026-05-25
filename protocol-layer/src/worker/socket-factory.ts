@@ -34,8 +34,8 @@ export function createBaileysSocket(input: SocketFactoryInput): WASocket {
   return makeWASocket({
     auth: input.auth,
     logger: logger.child({ accountId: input.accountId }) as never,
-    agent: proxy.agent,
-    fetchAgent: proxy.fetchAgent,
+    agent: proxy.agent as never,
+    fetchAgent: proxy.fetchAgent as never,
     markOnlineOnConnect: config.baileys.markOnlineOnConnect,
     syncFullHistory: config.baileys.syncFullHistory,
     fireInitQueries: config.baileys.fireInitQueries,

@@ -23,7 +23,7 @@
 - 消息、群、profile、business、channel 等协议动作。
 - 状态机、NEED_REAUTH、STALE、重连。
 - Registry owner 仲裁，保证同一 accountId 只由一个 worker 拉 socket。
-- NATS 事件上报和 Prometheus 指标。
+- Kafka 事件上报和 Prometheus 指标。
 
 ## Owner 路由模型
 
@@ -32,7 +32,7 @@
 功能层维护 `accountId -> ownerEndpoint` 缓存，数据来源按优先级：
 
 1. 登录 / 导入 / online 响应里的 `routing.ownerEndpoint`。
-2. NATS 事件：`account.owner_assigned`、`account.owner_changed`、`account.owner_unassigned`。
+2. Kafka owner topic 事件：`account.owner_assigned`、`account.owner_changed`、`account.owner_unassigned`。
 3. 纠偏接口：
 
 ```text

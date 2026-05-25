@@ -37,7 +37,7 @@
 
 依赖：
   - Redis 单实例（< 4GB）
-  - NATS JetStream
+  - Kafka / AWS MSK
   - PostgreSQL（启用 L3）
 ```
 

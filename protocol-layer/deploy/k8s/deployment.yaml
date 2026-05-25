@@ -18,6 +18,14 @@ data:
   BAILEYS_EMIT_OWN_EVENTS: "false"
   LOG_LEVEL: "info"
   LOG_PRETTY: "false"
+  EVENT_BACKEND: "kafka"
+  KAFKA_CLIENT_ID: "protocol-layer"
+  KAFKA_SSL: "true"
+  KAFKA_TOPIC_ACCOUNT: "protocol.account.events.v1"
+  KAFKA_TOPIC_OWNER: "protocol.owner.events.v1"
+  KAFKA_TOPIC_MESSAGE: "protocol.message.events.v1"
+  KAFKA_TOPIC_GROUP: "protocol.group.events.v1"
+  KAFKA_TOPIC_PAIRING: "protocol.pairing.events.v1"
 
 ---
 apiVersion: v1
@@ -70,9 +78,9 @@ spec:
             - name: REDIS_URL
               valueFrom:
                 secretKeyRef: { name: protocol-secrets, key: redis_url }
-            - name: NATS_SERVERS
+            - name: KAFKA_BROKERS
               valueFrom:
-                secretKeyRef: { name: protocol-secrets, key: nats_servers }
+                secretKeyRef: { name: protocol-secrets, key: kafka_brokers }
             - name: PG_CONNECTION_STRING
               valueFrom:
                 secretKeyRef: { name: protocol-secrets, key: pg_url }
@@ -143,9 +151,9 @@ spec:
             - name: REDIS_URL
               valueFrom:
                 secretKeyRef: { name: protocol-secrets, key: redis_url }
-            - name: NATS_SERVERS
+            - name: KAFKA_BROKERS
               valueFrom:
-                secretKeyRef: { name: protocol-secrets, key: nats_servers }
+                secretKeyRef: { name: protocol-secrets, key: kafka_brokers }
             - name: PG_CONNECTION_STRING
               valueFrom:
                 secretKeyRef: { name: protocol-secrets, key: pg_url }
