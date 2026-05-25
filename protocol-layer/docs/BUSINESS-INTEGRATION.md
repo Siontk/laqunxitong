@@ -1,5 +1,7 @@
 # 业务层接入技术说明
 
+> 联调步骤和 Kafka/HTTP 示例见 [`FUNCTION-INTEGRATION-PLAYBOOK.md`](FUNCTION-INTEGRATION-PLAYBOOK.md)。
+
 ## 目标
 
 协议层只负责 WhatsApp 协议连接、账号状态、重连、分片 owner、轻量事件上报。业务层负责对象存储、任务编排、批量调度、业务重试、消息记录和风控策略。

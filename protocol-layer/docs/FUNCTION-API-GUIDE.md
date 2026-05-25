@@ -1,5 +1,7 @@
 # 功能层 API 对接文档
 
+> 端到端联调手册见 [`FUNCTION-INTEGRATION-PLAYBOOK.md`](FUNCTION-INTEGRATION-PLAYBOOK.md)。
+
 本文给功能层/业务层联调用。协议层只做 WhatsApp 协议能力、账号 socket、状态、分片 owner；业务层负责对象存储、任务队列、业务重试和数据落库。
 
 ## 基础约定

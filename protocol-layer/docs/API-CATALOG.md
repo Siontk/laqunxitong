@@ -2,6 +2,7 @@
 
 > 完整字段以 [`openapi/protocol-v1.yaml`](../../openapi/protocol-v1.yaml) 为准。
 > Swagger UI: `http://{worker}:8080/docs`
+> 联调手册：[`FUNCTION-INTEGRATION-PLAYBOOK.md`](FUNCTION-INTEGRATION-PLAYBOOK.md)
 
 ## 通用三件套（业务侧约定动作）
 
