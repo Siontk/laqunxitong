@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'protocol-master'
+    static_configs:
+      - targets: ['protocol-master:8080']
+  - job_name: 'protocol-workers'
+    static_configs:
+      - targets: ['protocol-worker-1:8081', 'protocol-worker-2:8082']
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+  - job_name: 'nats'
+    static_configs:
+      - targets: ['nats:8222']

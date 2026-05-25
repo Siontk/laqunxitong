@@ -1,0 +1,8 @@
+{
+  "name": "unknown-format-empty-object",
+  "description": "合法 JSON 但完全不含已知字段 → UNSUPPORTED_FORMAT 或 NEED_REAUTH",
+  "input": {
+    "accountJsonBase64": "eyJmb28iOiJiYXIiLCJ0ZXN0IjoidmFsdWUifQo="
+  },
+  "expectedResultOneOf": ["UNSUPPORTED_FORMAT", "NEED_REAUTH"]
+}

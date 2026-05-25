@@ -1,0 +1,8 @@
+{
+  "name": "invalid-base64-payload",
+  "description": "accountJsonBase64 不是合法 base64 → INVALID_CREDENTIAL",
+  "input": {
+    "accountJsonBase64": "!!! totally invalid base64 !!!"
+  },
+  "expectedResult": "INVALID_CREDENTIAL"
+}

@@ -1,0 +1,105 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: protocol-layer-alerts
+spec:
+  groups:
+    - name: protocol-layer.critical
+      interval: 30s
+      rules:
+        # ─── 进程级 ───
+        - alert: ProtocolLayerEventLoopLag
+          expr: unsea_event_loop_lag_seconds{job=~"protocol-.*"} > 0.2
+          for: 2m
+          labels: { severity: warning }
+          annotations:
+            summary: "Event loop lag P95 > 200ms ({{ $labels.worker }})"
+
+        - alert: ProtocolLayerRSSHigh
+          expr: process_resident_memory_bytes{job=~"protocol-.*"} > 1288490188   # 1.2 GB
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "RSS > 1.2 GB ({{ $labels.worker }})"
+
+        - alert: ProtocolLayerRSSTooHigh
+          expr: process_resident_memory_bytes{job=~"protocol-.*"} > 1503238553   # 1.4 GB
+          for: 2m
+          labels: { severity: critical }
+          annotations:
+            summary: "RSS > 1.4 GB — OOM imminent ({{ $labels.worker }})"
+
+        # ─── 账号状态 ───
+        - alert: NeedReauthSurge
+          expr: rate(unsea_disconnect_total{semantic="NEED_REAUTH"}[5m]) > 0.5
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "NEED_REAUTH surge > 0.5/s — possible WA risk wave"
+
+        - alert: ReconnectStorm
+          expr: sum(rate(unsea_reconnect_total[1m])) > 200
+          for: 2m
+          labels: { severity: warning }
+          annotations:
+            summary: "Reconnect storm — sum > 200/s"
+
+        - alert: StaleHigh
+          expr: rate(unsea_stale_detected_total[5m]) > 0.1
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "STALE detection rate > 0.1/s — keepalive may be too long"
+
+        - alert: AdoptionDelayHigh
+          expr: max(unsea_pending_adoption_seconds{stage="max"}) > 300
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "账号被 Registry 分配但 worker 5min 内未 adopt — worker 容量满 / proxy 缺 / creds 缺"
+
+        - alert: AdoptionBacklog
+          expr: max(unsea_pending_adoption_seconds{stage="count"}) > 100
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "Pending adoption queue > 100 — Reconciler 处理不过来或新账号灌入过快"
+
+        # ─── 风控 ───
+        - alert: RestrictionActiveSpike
+          expr: sum(unsea_restriction_active) > 50
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "More than 50 accounts under reachoutTimelock"
+
+        - alert: MessageCappingHigh
+          expr: sum(unsea_message_capping_status{status="CAPPED"}) > 100
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "More than 100 accounts CAPPED on new-chat quota"
+
+        # ─── 事件总线 ───
+        - alert: EventPublishErrors
+          expr: rate(unsea_events_publish_errors_total[5m]) > 1
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "Event publish error rate > 1/s — business layer blind"
+
+        # ─── 代理 ───
+        - alert: ProxyFailureSurge
+          expr: rate(unsea_proxy_failed_total[5m]) > 1
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "Proxy failure rate > 1/s"
+
+        # ─── 心跳 ───
+        - alert: WorkerLost
+          expr: time() - unsea_accounts_total > 60   # heartbeat 通过 accountsTotal 指标的更新时间反推
+          for: 1m
+          labels: { severity: critical }
+          annotations:
+            summary: "Worker stopped reporting metrics — likely crashed"

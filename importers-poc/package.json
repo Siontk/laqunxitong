@@ -1,0 +1,19 @@
+{
+  "name": "unsea-importers-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-vm-modules ./node_modules/.bin/jest"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.9.0",
+    "jest": "^30.0.5",
+    "ts-jest": "^29.4.0",
+    "typescript": "^5.8.2"
+  },
+  "peerDependencies": {
+    "baileys": "7.0.0-rc11"
+  }
+}

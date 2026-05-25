@@ -1,0 +1,13 @@
+{
+  "name": "invalid-base64",
+  "description": "clientStaticPrivateKey 包含非 base64 字符，应 INVALID_CREDENTIAL",
+  "input": {
+    "wid": "8617600627277",
+    "clientStaticPrivateKey": "!!! not base64 !!!",
+    "clientStaticPublicKey": "BXzBPQzW75d5aCQiCNVIUfGBtyjX1tC5Aw5gRqusHkAG",
+    "identityPrivateKey": "GPgg+QckPXr82DEP9b1KbBOlIh0nk1LzoliD3ZV5YEs=",
+    "identityPublicKey": "jBC0ERw9dh8jp4v34tAspVqm5p42tiY6RJoMI9FR2gE=",
+    "wsDeviceId": 0
+  },
+  "expectedResult": "INVALID_CREDENTIAL"
+}

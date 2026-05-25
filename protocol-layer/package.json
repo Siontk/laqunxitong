@@ -1,0 +1,50 @@
+{
+  "name": "@unsea/protocol-layer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Unsea WhatsApp protocol layer (Baileys 7.x) — 86 接口 + 2000 账号/机承载 + 集群",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --enable-source-maps dist/server.js",
+    "start:dev": "tsx watch src/server.ts",
+    "start:worker": "WORKER_ROLE=worker tsx watch src/server.ts",
+    "start:master": "WORKER_ROLE=master tsx watch src/server.ts",
+    "test": "node --experimental-vm-modules ./node_modules/.bin/jest",
+    "test:e2e": "node --experimental-vm-modules ./node_modules/.bin/jest --testPathPattern=e2e",
+    "lint": "tsc --noEmit",
+    "docker:build": "docker build -t unsea/protocol-layer:$(node -p \"require('./package.json').version\") .",
+    "docker:up": "docker compose -f deploy/docker-compose.yml up -d",
+    "docker:down": "docker compose -f deploy/docker-compose.yml down"
+  },
+  "dependencies": {
+    "@fastify/sensible": "^6.0.1",
+    "@fastify/swagger": "^9.0.0",
+    "@fastify/swagger-ui": "^5.0.0",
+    "baileys": "7.0.0-rc11",
+    "fastify": "^5.0.0",
+    "fastify-metrics": "^12.0.0",
+    "https-proxy-agent": "^7.0.5",
+    "ioredis": "^5.4.1",
+    "nats": "^2.28.0",
+    "pg": "^8.13.1",
+    "pino": "^9.6.0",
+    "pino-pretty": "^13.1.1",
+    "prom-client": "^15.1.3",
+    "socks-proxy-agent": "^8.0.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.9.0",
+    "@types/pg": "^8.11.10",
+    "jest": "^30.0.5",
+    "ts-jest": "^29.4.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

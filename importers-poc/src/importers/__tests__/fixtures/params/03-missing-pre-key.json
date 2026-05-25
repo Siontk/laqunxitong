@@ -1,0 +1,18 @@
+{
+  "name": "missing-sign-pre-key",
+  "description": "缺 signPreKey 系列字段，应返回 NEED_REAUTH",
+  "input": {
+    "wid": "8617600627277",
+    "clientStaticPrivateKey": "4GaIfq6ECs+36w3FX0bQkb3Y72cAcwffxAigzR9JdGs=",
+    "clientStaticPublicKey": "BXzBPQzW75d5aCQiCNVIUfGBtyjX1tC5Aw5gRqusHkAG",
+    "identityPrivateKey": "GPgg+QckPXr82DEP9b1KbBOlIh0nk1LzoliD3ZV5YEs=",
+    "identityPublicKey": "jBC0ERw9dh8jp4v34tAspVqm5p42tiY6RJoMI9FR2gE=",
+    "registrationID": 12345,
+    "signPreKeyID": 1,
+    "signPreKeyPrivateKey": "",
+    "signPreKeyPublicKey": "",
+    "signPreKeySignature": ""
+  },
+  "expectedResult": "NEED_REAUTH",
+  "expectedMissing": ["signPreKeyPrivateKey", "signPreKeyPublicKey", "signPreKeySignature"]
+}

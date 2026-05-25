@@ -1,0 +1,160 @@
+version: '3.9'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: unsea-redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "2gb", "--maxmemory-policy", "allkeys-lru"]
+    ports: ["6379:6379"]
+    volumes:
+      - redis-data:/data
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: unsea-nats
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: unsea-postgres
+    environment:
+      POSTGRES_USER: unsea
+      POSTGRES_PASSWORD: unsea
+      POSTGRES_DB: unsea
+    ports: ["5432:5432"]
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: unsea-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    ports: ["9090:9090"]
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=7d'
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: unsea-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports: ["3000:3000"]
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on: [prometheus]
+
+  protocol-master:
+    build:
+      context: ../
+      dockerfile: deploy/Dockerfile
+    container_name: unsea-protocol-master
+    environment:
+      WORKER_ROLE: master
+      NODE_ID: master-1
+      WORKER_ID: master-1
+      REDIS_URL: redis://redis:6379
+      NATS_SERVERS: nats://nats:4222
+      PG_ENABLED: "true"
+      PG_CONNECTION_STRING: postgres://unsea:unsea@postgres:5432/unsea
+      LOG_PRETTY: "true"
+      LOG_LEVEL: info
+    depends_on: [redis, nats, postgres]
+    ports: ["8080:8080"]
+
+  protocol-worker-1:
+    build:
+      context: ../
+      dockerfile: deploy/Dockerfile
+    container_name: unsea-protocol-worker-1
+    environment:
+      WORKER_ROLE: worker
+      NODE_ID: node-1
+      WORKER_ID: worker-1
+      HTTP_PORT: "8081"
+      PUBLIC_ENDPOINT: http://localhost:8081
+      REDIS_URL: redis://redis:6379
+      NATS_SERVERS: nats://nats:4222
+      PG_ENABLED: "true"
+      PG_CONNECTION_STRING: postgres://unsea:unsea@postgres:5432/unsea
+      MAX_ACCOUNTS_PER_WORKER: "500"
+      LOG_PRETTY: "true"
+    depends_on: [redis, nats, postgres, protocol-master]
+    ports: ["8081:8081"]
+
+  protocol-worker-2:
+    build:
+      context: ../
+      dockerfile: deploy/Dockerfile
+    container_name: unsea-protocol-worker-2
+    environment:
+      WORKER_ROLE: worker
+      NODE_ID: node-1
+      WORKER_ID: worker-2
+      HTTP_PORT: "8082"
+      PUBLIC_ENDPOINT: http://localhost:8082
+      REDIS_URL: redis://redis:6379
+      NATS_SERVERS: nats://nats:4222
+      PG_ENABLED: "true"
+      PG_CONNECTION_STRING: postgres://unsea:unsea@postgres:5432/unsea
+      MAX_ACCOUNTS_PER_WORKER: "500"
+      LOG_PRETTY: "true"
+    depends_on: [redis, nats, postgres, protocol-master]
+    ports: ["8082:8082"]
+
+  protocol-worker-3:
+    build:
+      context: ../
+      dockerfile: deploy/Dockerfile
+    container_name: unsea-protocol-worker-3
+    environment:
+      WORKER_ROLE: worker
+      NODE_ID: node-1
+      WORKER_ID: worker-3
+      HTTP_PORT: "8083"
+      PUBLIC_ENDPOINT: http://localhost:8083
+      REDIS_URL: redis://redis:6379
+      NATS_SERVERS: nats://nats:4222
+      PG_ENABLED: "true"
+      PG_CONNECTION_STRING: postgres://unsea:unsea@postgres:5432/unsea
+      MAX_ACCOUNTS_PER_WORKER: "500"
+      LOG_PRETTY: "true"
+    depends_on: [redis, nats, postgres, protocol-master]
+    ports: ["8083:8083"]
+
+  protocol-worker-4:
+    build:
+      context: ../
+      dockerfile: deploy/Dockerfile
+    container_name: unsea-protocol-worker-4
+    environment:
+      WORKER_ROLE: worker
+      NODE_ID: node-1
+      WORKER_ID: worker-4
+      HTTP_PORT: "8084"
+      PUBLIC_ENDPOINT: http://localhost:8084
+      REDIS_URL: redis://redis:6379
+      NATS_SERVERS: nats://nats:4222
+      PG_ENABLED: "true"
+      PG_CONNECTION_STRING: postgres://unsea:unsea@postgres:5432/unsea
+      MAX_ACCOUNTS_PER_WORKER: "500"
+      LOG_PRETTY: "true"
+    depends_on: [redis, nats, postgres, protocol-master]
+    ports: ["8084:8084"]
+
+volumes:
+  redis-data:
+  nats-data:
+  pg-data:
+  prom-data:
+  grafana-data:

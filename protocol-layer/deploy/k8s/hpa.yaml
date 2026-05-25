@@ -1,0 +1,45 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: protocol-worker-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: protocol-worker
+  minReplicas: 4
+  maxReplicas: 50
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 70
+    # 自定义指标：账号数 / 容量利用率
+    - type: Pods
+      pods:
+        metric:
+          name: unsea_accounts_total
+        target:
+          type: AverageValue
+          averageValue: "425"  # 单 worker 平均 425 账号触发扩容（容量 500）
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 2     # 每分钟最多扩 2 个 worker（避免雪崩）
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Pods
+          value: 1     # 缩容每 10 分钟最多 1 个
+          periodSeconds: 600

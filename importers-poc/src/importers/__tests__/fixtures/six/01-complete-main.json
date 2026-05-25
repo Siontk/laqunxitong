@@ -1,0 +1,20 @@
+{
+  "name": "complete-six-main-device",
+  "description": "完整六段 + deviceIdentityKey + wsDeviceId=0（主设备），应转 CONVERTED_PARTIAL",
+  "input": {
+    "wid": "8617600627277",
+    "clientStaticPrivateKey": "4GaIfq6ECs+36w3FX0bQkb3Y72cAcwffxAigzR9JdGs=",
+    "clientStaticPublicKey": "BXzBPQzW75d5aCQiCNVIUfGBtyjX1tC5Aw5gRqusHkAG",
+    "identityPrivateKey": "GPgg+QckPXr82DEP9b1KbBOlIh0nk1LzoliD3ZV5YEs=",
+    "identityPublicKey": "jBC0ERw9dh8jp4v34tAspVqm5p42tiY6RJoMI9FR2gE=",
+    "deviceIdentityKey": "ChEI2cDYRRDlmObc9ZsHEgEYIAEoATIYAQI5RkSc0DQVdJTH7K/AiFUYZmsZRRrlmObc9ZsHGAAhYW0g9HYk",
+    "phoneId": "bdaa1617b7e511ef93c80a6259d9b52b",
+    "operator": "460----00----CMCC",
+    "wsDeviceId": 0,
+    "qrId": "1001",
+    "vip": false
+  },
+  "expectedResult": "CONVERTED_PARTIAL",
+  "expectedPlatform": "android",
+  "expectedWarningsContain": "signedPreKey"
+}

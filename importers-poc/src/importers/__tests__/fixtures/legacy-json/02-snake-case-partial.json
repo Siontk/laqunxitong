@@ -1,0 +1,9 @@
+{
+  "name": "snake-case-partial",
+  "description": "snake_case 命名 + 缺 signedPreKey/keys，应转 CONVERTED_PARTIAL 并归一化字段名",
+  "input": {
+    "accountJsonBase64": "ewogICJub2lzZV9rZXkiOiB7CiAgICAicHJpdmF0ZSI6ICI0R2FJZnE2RUNzKzM2dzNGWDBiUWtiM1k3MmNBY3dmZnhBaWd6UjlKZEdzPSIsCiAgICAicHVibGljIjogIkJYekJQUXpXNzVkNWFDUWlDTlZJVWZHQnR5algxdEM1QXc1Z1JxdXNIa0FHIgogIH0sCiAgInNpZ25lZF9pZGVudGl0eV9rZXkiOiB7CiAgICAicHJpdmF0ZSI6ICJHUGdnK1Fja1BYcjgyREVQOWIxS2JCT2xJaDBuazFMem9saUQzWlY1WUVzPSIsCiAgICAicHVibGljIjogImpCQzBFUnc5ZGg4anA0djM0dEFzcFZxbTVwNDJ0aVk2UkpvTUk5RlIyZ0U9IgogIH0sCiAgInBob25lIjogIjg2MTc2MDA2MjcyNzciCn0K"
+  },
+  "expectedResult": "CONVERTED_PARTIAL",
+  "expectedWarningsContain": "signedPreKey"
+}

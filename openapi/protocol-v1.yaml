@@ -1,0 +1,3679 @@
+openapi: 3.1.0
+info:
+  title: unsea Protocol API v1
+  version: 1.0.0-draft
+  description: |
+    新一代 WhatsApp 协议层接口（基于 Baileys 7.x）。
+    本规范覆盖《Baileys 协议层接口封装与 2000 账号承载方案》§ 3 + 附录 A。
+
+    ## 设计原则
+
+    - 协议层只负责 ws / Noise / creds / 重连，业务编排在 Java 业务层
+    - 所有状态查询都带 evidence（时间戳 + 来源）
+    - 所有重连相关都对应明确的语义码（PROXY_FAILED / RATE_LIMITED / NEED_REAUTH ...）
+    - 接口契约稳定，protobuf 内部码不外泄
+
+    ---
+
+    ## 业务场景导航
+
+    ### 🔑 账号登录 / 授权（3 种方式 + 4 种导入）
+
+    | 业务场景 | 接口 | 说明 |
+    |---|---|---|
+    | 首次绑定新号（pairing code） | `POST /v1/auth/pairing-code` | 用户在手机 WA "已登录设备" 里输入 8 位码；90s 不绑会自动释放 |
+    | 首次绑定新号（扫码） | `POST /v1/auth/qrcode` | 用户用手机 WA 扫返回的二维码；180s 不绑会自动释放 |
+    | 标准 Baileys JSON 导入（推荐） | `POST /v1/accounts/import/baileys-json` | 完整 creds + keys，导入即可上线 |
+    | 全参数登录（30+ 字段） | `POST /v1/accounts/import/params` | 移植自 Apifox `paramsLogin` |
+    | 六段参数登录 | `POST /v1/accounts/import/six` | 移植自 Apifox `sixLogin`，含 deviceIdentityKey |
+    | 旧 JSON 登录 | `POST /v1/accounts/import/legacy-json` | 移植自 Apifox `jsonLogin`，base64 |
+    | 批量导入（最多 500） | `POST /v1/accounts/import/batch` | 含冷启动节流，避免一次性灌爆 worker |
+    | 短信注册新号 | （不支持） | WA 业务不开放此能力 |
+
+    **关键概念**：换 IP 不需要重新授权（详见 § 4.3）。一次 pairing 后 creds 永久持有，重连用本地 creds 即可。
+
+    ### 🚪 账号生命周期
+
+    | 业务场景 | 接口 |
+    |---|---|
+    | 已绑账号上线（用已存 creds） | `POST /v1/accounts/{accountId}/online` |
+    | 主动下线（保留 creds，可重新 online） | `POST /v1/accounts/{accountId}/offline` |
+    | 退出并移除设备 | `POST /v1/accounts/{accountId}/logout` |
+
+    ### 🏷️ 账号状态查询
+
+    | 业务场景 | 接口 |
+    |---|---|
+    | 完整状态 + evidence（含 business 识别） | `GET /v1/accounts/{accountId}/status` |
+    | 轻量探活（高频调用便宜） | `GET /v1/accounts/{accountId}/alive` |
+    | 账号类型（个人 / Business / VerifiedBusiness） | `GET /v1/accounts/{accountId}/type` |
+    | 主动 ping 服务端（关键操作前用） | `POST /v1/accounts/{accountId}/probe` |
+    | 批量检查手机号是否 WA 用户 | `POST /v1/accounts/check-whatsapp` |
+    | 解析账号属于哪个 worker（owner） | `GET /v1/accounts/resolve/{accountId}` |
+
+    ### ⚠️ 账号风控查询（拉群任务必查）
+
+    | 业务场景 | 接口 | 说明 |
+    |---|---|---|
+    | 业务可用性综合判定（推荐） | `GET /v1/accounts/{accountId}/usability` | 一个接口拿 canCreateGroup / canSendNewChat / blockedReason / blockedUntil |
+    | reachoutTimelock（被禁几小时） | `GET /v1/accounts/{accountId}/restriction` | 14 种 enforcementType |
+    | 新 chat 配额（拉群配额） | `GET /v1/accounts/{accountId}/message-cap` | NONE / FIRST_WARNING / SECOND_WARNING / CAPPED |
+
+    **使用模式**：业务侧下发拉群 / 加人任务前调 `/usability`，`canCreateGroup=true` 才派发。
+
+    ### 🌐 代理（动态住宅 IP 10-15min sticky）
+
+    | 业务场景 | 接口 |
+    |---|---|
+    | 绑定 / 切换代理 | `POST /v1/accounts/{accountId}/proxy/bind` |
+    | 重新分配代理（PROXY_FAILED 处理） | `POST /v1/accounts/{accountId}/proxy/rebind` |
+    | 查询当前代理 | `GET /v1/accounts/{accountId}/proxy` |
+
+    **关键**：换 IP 不需要重新授权，只是触发协议层重连。
+
+    ### 👥 群组（拉群业务核心）
+
+    | 业务场景 | 接口 |
+    |---|---|
+    | 建群 | `POST /v1/groups/create` |
+    | 拉人进群（核心接口） | `POST /v1/groups/{groupJid}/participants/add` |
+    | 移除成员 | `POST /v1/groups/{groupJid}/participants/remove` |
+    | 设/取消管理员 | `POST /v1/groups/{groupJid}/participants/{promote,demote}` |
+    | 查群详情 / 成员 | `GET /v1/groups/{groupJid}/{metadata,participants}` |
+    | 账号所有群 | `GET /v1/accounts/{accountId}/groups` |
+    | 群名 / 描述 / 头像 | `POST /v1/groups/{groupJid}/{subject,description,picture}` |
+    | 邀请 code + 通过 code 进群 | `GET /v1/groups/{jid}/invite-code` + `POST /v1/groups/join` |
+    | 群权限设置（仅管理员发言 / 锁定 / 加人模式 / 入群审批） | `POST /v1/groups/{jid}/settings/*` |
+    | 入群审批（待审批列表 / 批准 / 拒绝） | `GET /v1/groups/{jid}/pending` + `POST .../approve` / `.../reject` |
+    | 退群 | `POST /v1/groups/{jid}/leave` |
+
+    ### 💬 消息
+
+    | 业务场景 | 接口 |
+    |---|---|
+    | 发文本 | `POST /v1/messages/text` |
+    | 发图片 / 视频 / 音频 / 文档 | `POST /v1/messages/{image,video,audio,document}` |
+    | 发地理位置 / 名片 / 链接 | `POST /v1/messages/{location,contact-card,link}` |
+    | 撤回 / 转发 / 表情反应 | `POST /v1/messages/{delete,forward,reaction}` |
+    | 标记已读 / 输入中 | `POST /v1/messages/{read,typing}` |
+    | 按需下载媒体（base64/url/stream） | `POST /v1/messages/{messageId}/download` |
+    | 发动态 status@broadcast | `POST /v1/messages/status` |
+
+    ### 👤 联系人与会话
+
+    | 业务场景 | 接口 |
+    |---|---|
+    | 添加 / 删除联系人 | `POST /v1/contacts/{jid}/save` / `DELETE /v1/contacts/{jid}` |
+    | 拉黑 / 取消拉黑 | `POST /v1/contacts/{jid}/{block,unblock}` |
+    | 会话静音 / 清空 / 删除 / 归档 / 置顶 / 标记已读 | `POST /v1/chats/{jid}/{mute,clear,delete,archive,pin,mark-read}` |
+
+    ### 🪪 资料
+
+    | 业务场景 | 接口 |
+    |---|---|
+    | 改自己昵称 / 签名 / 头像 | `POST /v1/profile/{name,status,picture}` |
+    | 查他人头像 URL | `GET /v1/profile/{jid}/picture-url` |
+
+    ### 🏢 Business 资料（仅 Business 号可用，个人号调返 422）
+
+    | 业务场景 | 接口 |
+    |---|---|
+    | 查 Business profile（可判他人是否 Business） | `GET /v1/profile/business/{jid}` |
+    | 更新自己 Business profile | `POST /v1/profile/business/update` |
+    | catalog / 商品 CRUD | `GET /v1/business/catalog` + `POST /v1/business/product` |
+
+    ### 📡 频道 newsletter
+
+    | 业务场景 | 接口 |
+    |---|---|
+    | 订阅 / 取消订阅 | `POST /v1/channels/{follow,unfollow}` |
+    | 拉历史消息 | `GET /v1/channels/{jid}/messages` |
+    | 反应表情 | `POST /v1/channels/{jid}/reaction` |
+
+    ### 📦 导出（跨集群迁移、备份）
+
+    | 业务场景 | 接口 |
+    |---|---|
+    | 导出标准 Baileys JSON | `GET /v1/accounts/{accountId}/export/baileys-json` |
+    | 导出竞品兼容平铺 creds JSON | `GET /v1/accounts/{accountId}/export/creds-json` |
+    | 导出便携 JSON（含 proxy 元数据） | `GET /v1/accounts/{accountId}/export/portable` |
+    | 批量导出 | `POST /v1/accounts/export/batch` |
+
+    ### 🛠️ 运维（仅内网，不开放业务）
+
+    | 业务场景 | 接口 |
+    |---|---|
+    | 手动硬同步 Registry load | `POST /v1/admin/sync-load` |
+    | 列 worker 集群（含 dead） | `GET /v1/admin/workers` |
+    | 列 dead worker | `GET /v1/admin/dead-workers` |
+    | 当前 worker 账号视图 | `GET /v1/admin/accounts` |
+    | 手动 unassign（兜底） | `POST /v1/admin/unassign` |
+
+    ---
+
+    ## 业务侧使用三件套
+
+    1. **下发任务前**：调 `GET /v1/accounts/{id}/usability`，看 `canCreateGroup` / `canAddToGroup` 是否 true
+    2. **找正确的 worker**：调 `GET /v1/accounts/resolve/{id}` 拿 `ownerEndpoint`，业务侧缓存 30-60s
+    3. **订阅事件**：NATS subject `unsea.v1.events.*`，业务侧消费 19 个事件类型
+
+    ## 错误码
+
+    | HTTP | code | 含义 | 业务侧处理 |
+    |---|---|---|---|
+    | 400 | `VALIDATION_ERROR` | body schema 验证失败 | 修请求 |
+    | 404 | `ACCOUNT_NOT_FOUND` | 当前 worker 没有此账号运行态 | 看 `/status` 确认是否 `slotReleased` |
+    | 409 | `NOT_OWNER` | 请求打到非 owner worker | 改请求 `details.ownerEndpoint` |
+    | 422 | `NEED_REAUTH` | creds 失效，必须重新 pairing | 业务侧引导用户重做 pairing |
+    | 422 | `NOT_BUSINESS_ACCOUNT` | 个人号调 Business 接口 | 检查 `accountType` |
+    | 429 | `RATE_LIMITED` | 协议层主动限流 | 退避重试，看 `retryAfterMs` |
+    | 503 | `ACCOUNT_UNAVAILABLE` | 账号 OFFLINE / NEED_REAUTH / 风控 | 查 `/usability` 决定下一步 |
+
+    ## 事件订阅
+
+    NATS subject: `unsea.v1.events.{event}`。关键事件走 JetStream + ack，普通走 best-effort。
+    详见 webhooks 部分（OpenAPI Swagger UI 底部）和 [BUSINESS-INTEGRATION.md](https://github.com/your-org/unsea/blob/main/protocol-layer/docs/BUSINESS-INTEGRATION.md)。
+servers:
+  - url: http://protocol.unsea.local:8080
+    description: 协议层 worker 集群入口（经 Registry 路由）
+
+tags:
+  - name: auth
+    description: |
+      **首次绑定**新号（pairing code / QR 扫码）。
+
+      90s（pairing code）/ 180s（QR）内不绑定会自动释放 slot，避免用户拖延占资源。
+      已绑账号重新上线请走 `lifecycle`，不要重复 pairing。
+  - name: import
+    description: |
+      **导入已有 creds** — 4 种格式：
+      - `baileys-json`：标准 Baileys auth_state（推荐）
+      - `params`：移植 Apifox `paramsLogin`，30+ 硬件字段
+      - `six`：移植 Apifox `sixLogin`，含 deviceIdentityKey（分身设备）
+      - `legacy-json`：移植 Apifox `jsonLogin`，base64 旧 JSON
+
+      所有导入路径都返回 `BusinessDetection`，业务侧能直接拿到账号类型。
+      批量接口含**冷启动节流**（默认 50 个/批 30s 间隔）。
+  - name: export
+    description: 跨集群迁移 / 备份 / 故障转移用。导出含 creds + keys + proxy 元数据。
+  - name: lifecycle
+    description: |
+      账号生命周期：online / offline / logout。
+
+      **换 IP 不需要 logout/online**，由协议层自动重连（详见 § 4.3）。
+      offline 保留 creds 可重新 online；logout 远端踢设备 + 删 creds。
+  - name: status
+    description: |
+      状态查询。所有响应都带 **evidence**（时间戳 + 来源），业务侧可判 freshness。
+
+      高频调用建议用 `/alive` 轻量探活；下发任务前调 `/usability` 综合判定。
+  - name: owner
+    description: |
+      **集群路由解析**。业务侧调任何账号接口前先 resolve 一次，
+      拿到 `ownerEndpoint` 后直连 owner worker。建议业务侧缓存 30-60s。
+      非 owner 收到请求会返 `409 NOT_OWNER` + 在 details 里给 ownerEndpoint。
+  - name: restriction
+    description: |
+      **账号风控查询** — 拉群业务必查。
+
+      - `restriction`: reachoutTimelock（"账号被禁几小时"），14 种 enforcementType
+      - `message-cap`: 新 chat 配额（拉群算新 chat），CAPPED 时不能拉群
+      - `usability`: 综合判定（推荐入口），含 canCreateGroup / canSendNewChat / blockedReason / blockedUntil
+  - name: proxy
+    description: |
+      代理绑定。**绑定的是 sessionId 不是 IP**（动态住宅 10-15min sticky）。
+      country/ASN 钉死，IP 由代理商每 10-15 分钟轮换，协议层自动重连，业务无感。
+  - name: groups
+    description: |
+      群组（拉群业务核心）。
+
+      - `groupParticipantsUpdate` 返回 **per-participant status**（200/403/408/409/419/500），业务侧能精准定位失败成员
+      - 拉人前应先调 `/v1/accounts/{id}/usability` 确认 canAddToGroup
+  - name: messages
+    description: |
+      消息发送 + 媒体下载。
+
+      - 媒体输入支持 url / base64 / path 三选一；优先用 **url**（业务侧对象存储），省协议层带宽
+      - 媒体下载支持 `base64` / `stream`；长期存储、CDN URL 和对象存储生命周期由业务层负责
+  - name: contacts
+    description: 联系人与会话管理。chatModify 系列（mute/clear/archive/pin/markRead）走 chat_id。
+  - name: profile
+    description: 自己的资料（昵称/签名/头像）+ 查他人头像 URL。
+  - name: business
+    description: |
+      Business 专属（catalog / product / business profile）。
+
+      个人号调这些接口返回 **422 NOT_BUSINESS_ACCOUNT**。
+      业务侧应先调 `/v1/accounts/{id}/type` 看 `isBusiness=true` 再调。
+      `GET /v1/profile/business/{jid}` 可用来判别 **他人账号** 是否 Business（profile==null 即个人号）。
+  - name: channels
+    description: 频道 newsletter（订阅 / 取消订阅 / 拉历史消息 / 反应）。
+  - name: admin
+    description: |
+      运维 / 诊断（**仅内网**，业务勿用）。
+
+      `/sync-load` 用于 Registry load 偏差纠偏，正常生产不需要。
+      `/workers`, `/dead-workers`, `/accounts` 是只读诊断。
+      `/unassign` 是兜底，谨慎用。
+
+paths:
+  # ──────────────────── A.1 授权与导入 ────────────────────
+  /v1/auth/pairing-code:
+    post:
+      tags: [auth]
+      summary: 首次绑定取 pairing code
+      description: |
+        异步接口。返回 code 通过事件 `pairing.code_generated` 推送。
+        Baileys: `sock.requestPairingCode(phone, customPairingCode)`。
+        `customPairingCode` 不传时，协议层会优先使用环境变量 `PAIRING_DEFAULT_CODE`；也未配置时由 Baileys 随机生成。
+      operationId: requestPairingCode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, proxy]
+              properties:
+                phone:
+                  type: string
+                  pattern: '^[0-9]{10,15}$'
+                  example: "8617600627277"
+                clientRefId:
+                  type: string
+                  description: 业务侧关联 ID（兼容 Apifox qrId）
+                customPairingCode:
+                  type: string
+                  pattern: '^[A-Za-z0-9]{8}$'
+                  description: 自定义 8 位 code（可选）。不传则使用服务端 `PAIRING_DEFAULT_CODE`，再没有才随机。
+                  example: "12345678"
+                deviceProfile:
+                  $ref: '#/components/schemas/DeviceProfile'
+                browserDisplay:
+                  $ref: '#/components/schemas/BrowserDisplay'
+                proxy:
+                  $ref: '#/components/schemas/ProxyBinding'
+      responses:
+        '202':
+          description: 已发起 pairing 流程
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accountId: { type: string }
+                  pairingId: { type: string }
+                  expiresAt: { type: string, format: date-time }
+
+  /v1/auth/qrcode:
+    post:
+      tags: [auth]
+      summary: 首次绑定取二维码
+      operationId: requestQrCode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [proxy]
+              properties:
+                clientRefId: { type: string }
+                deviceProfile:
+                  $ref: '#/components/schemas/DeviceProfile'
+                browserDisplay:
+                  $ref: '#/components/schemas/BrowserDisplay'
+                proxy:
+                  $ref: '#/components/schemas/ProxyBinding'
+      responses:
+        '202':
+          description: 已发起 QR 流程，QR 通过事件 `qr.code_generated` 推送
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accountId: { type: string }
+                  qrSessionId: { type: string }
+
+  /v1/accounts/import/baileys-json:
+    post:
+      tags: [import]
+      summary: 导入标准 Baileys auth_state JSON
+      operationId: importBaileysJson
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [json, proxy]
+              properties:
+                accountId:
+                  type: string
+                  description: 可选；不传则由协议层生成
+                json:
+                  $ref: '#/components/schemas/BaileysAuthState'
+                proxy:
+                  $ref: '#/components/schemas/ProxyBinding'
+                autoOnline:
+                  type: boolean
+                  default: true
+      responses:
+        '200':
+          description: 导入成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImportResult' }
+
+  /v1/accounts/import/params:
+    post:
+      tags: [import]
+      summary: 导入全参数登录（移植自 Apifox paramsLogin）
+      description: 移植自 `/api/login/paramsLogin`，30+ 硬件参数 + 密钥 + 代理
+      operationId: importParams
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ParamsLoginBody' }
+      responses:
+        '200':
+          description: 转换 + 导入结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImportResult' }
+
+  /v1/accounts/import/six:
+    post:
+      tags: [import]
+      summary: 导入六段参数登录（移植自 Apifox sixLogin）
+      operationId: importSix
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SixLoginBody' }
+      responses:
+        '200':
+          description: 转换 + 导入结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImportResult' }
+
+  /v1/accounts/import/legacy-json:
+    post:
+      tags: [import]
+      summary: 导入旧 JSON 登录（移植自 Apifox jsonLogin）
+      operationId: importLegacyJson
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LegacyJsonLoginBody' }
+      responses:
+        '200':
+          description: 转换 + 导入结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImportResult' }
+
+  /v1/accounts/import/batch:
+    post:
+      tags: [import]
+      summary: 批量导入（P1）
+      operationId: importBatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    oneOf:
+                      - $ref: '#/components/schemas/ParamsLoginBody'
+                      - $ref: '#/components/schemas/SixLoginBody'
+                      - $ref: '#/components/schemas/LegacyJsonLoginBody'
+                autoOnline: { type: boolean, default: true }
+      responses:
+        '200':
+          description: 批量结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  succeeded: { type: integer }
+                  failed: { type: integer }
+                  results:
+                    type: array
+                    items: { $ref: '#/components/schemas/BatchImportItemResult' }
+
+  /v1/accounts/{accountId}/export/baileys-json:
+    get:
+      tags: [export]
+      summary: 导出标准 Baileys auth_state JSON
+      operationId: exportBaileysJson
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 完整 Baileys auth_state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BaileysAuthState' }
+
+  /v1/accounts/{accountId}/export/creds-json:
+    get:
+      tags: [export]
+      summary: 导出竞品兼容平铺 creds JSON
+      description: |
+        返回顶层平铺的 Baileys creds，形状类似 `{ me, Phone, account, noiseKey, signedPreKey, registrationId, ... }`。
+        此接口不包含 Signal keys，主要用于兼容竞品导出格式或功能层联调核对；完整迁移优先使用 `baileys-json` 或 `portable`。
+      operationId: exportFlatCredsJson
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 顶层平铺 creds JSON
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FlatCredsExport' }
+
+  /v1/accounts/{accountId}/export/portable:
+    get:
+      tags: [export]
+      summary: 导出便携 JSON（含业务元数据）
+      operationId: exportPortable
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 便携 JSON
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PortableExport' }
+
+  /v1/accounts/export/batch:
+    post:
+      tags: [export]
+      summary: 批量导出账号 JSON
+      description: |
+        批量导出账号。`creds-json` 只读取 creds，不扫描 Signal keys，适合兼容竞品格式或大批量联调核对；
+        完整迁移请使用 `baileys-json` 或 `portable`。
+      operationId: exportBatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountIds]
+              properties:
+                accountIds:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items: { type: string }
+                format:
+                  type: string
+                  enum: [baileys-json, portable, creds-json]
+                  default: portable
+                concurrency:
+                  type: integer
+                  minimum: 1
+                  maximum: 20
+                  default: 5
+      responses:
+        '200':
+          description: 批量导出结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchExportResult' }
+
+  # ──────────────────── A.2 账号生命周期 ────────────────────
+  /v1/accounts/{accountId}/online:
+    post:
+      tags: [lifecycle]
+      summary: 已有 creds 上线
+      description: |
+        协议层用本地 creds 重新建立 ws，**不会重新走 pairing**。
+        如需重新授权，触发 NEED_REAUTH 后业务侧调 /v1/auth/pairing-code。
+      operationId: onlineAccount
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                proxy:
+                  $ref: '#/components/schemas/ProxyBinding'
+                deviceProfile:
+                  $ref: '#/components/schemas/DeviceProfile'
+                browserDisplay:
+                  $ref: '#/components/schemas/BrowserDisplay'
+      responses:
+        '202':
+          description: 已发起上线，状态通过事件 `account.state_changed` 推送
+
+  /v1/accounts/{accountId}/offline:
+    post:
+      tags: [lifecycle]
+      summary: 主动下线，保留 creds
+      operationId: offlineAccount
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 已下线
+
+  /v1/accounts/{accountId}/logout:
+    post:
+      tags: [lifecycle]
+      summary: 退出并移除设备（远端踢自己）
+      operationId: logoutAccount
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 已 logout
+
+  # ──────────────────── A.2.1 Owner 路由 ────────────────────
+  /v1/accounts/resolve/{accountId}:
+    get:
+      tags: [owner]
+      summary: 查询账号当前 owner worker
+      description: |
+        业务层先调用此接口拿到 `ownerEndpoint`，随后直接请求 owner worker。
+        协议层不做 worker 间请求代理，避免大请求/媒体请求多走一跳。
+      operationId: resolveAccountOwner
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: owner 解析结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OwnerResolution' }
+
+  /v1/accounts/resolve:
+    post:
+      tags: [owner]
+      summary: 批量查询账号 owner worker
+      description: 业务层批量调度前按 ownerEndpoint 分组，减少协议层网关压力。
+      operationId: resolveAccountOwners
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountIds]
+              properties:
+                accountIds:
+                  type: array
+                  minItems: 1
+                  maxItems: 1000
+                  items: { type: string }
+      responses:
+        '200':
+          description: 批量 owner 解析结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resolvedAt: { type: string, format: date-time }
+                  currentWorkerId: { type: string }
+                  results:
+                    type: array
+                    items: { $ref: '#/components/schemas/OwnerResolution' }
+
+  # ──────────────────── A.3 账号状态查询 ────────────────────
+  /v1/accounts/{accountId}/status:
+    get:
+      tags: [status]
+      summary: 完整状态 + evidence
+      operationId: getAccountStatus
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 完整状态对象
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccountStatus' }
+
+  /v1/accounts/{accountId}/alive:
+    get:
+      tags: [status]
+      summary: 轻量探活（GET 同路径与 POST online 冲突，改名 alive）
+      operationId: getAlive
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 轻量响应
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  online: { type: boolean }
+                  ageMs: { type: integer }
+                  reportedAt: { type: string, format: date-time }
+
+  /v1/accounts/{accountId}/type:
+    get:
+      tags: [status]
+      summary: 账号类型 PERSONAL / BUSINESS_STANDARD / BUSINESS_VERIFIED + 检测来源
+      description: |
+        返回账号类型 + 检测来源 + 关键字段（platform/bizName/verifiedName）。
+        业务侧调用 Business 专属接口（catalog/product）前应先调这个确认 isBusiness=true。
+        识别时机：pairing 完成时自动定型，重连不变化，所以这个接口高频调用很便宜（命中本地缓存）。
+      operationId: getAccountType
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 账号类型与检测元数据
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BusinessDetection' }
+
+  /v1/accounts/{accountId}/type/refresh:
+    post:
+      tags: [status]
+      summary: 强制刷新账号类型（运维兜底用）
+      description: |
+        正常情况下账号类型在 pairing 时定型，无需重新识别。
+        此接口强制调用 Baileys `getBusinessProfile(selfJid)` 重新探测。
+        生产环境**不要**周期性调用，仅 troubleshooting 用。
+      operationId: refreshAccountType
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 刷新后的类型
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BusinessDetection' }
+
+  /v1/accounts/{accountId}/probe:
+    post:
+      tags: [status]
+      summary: 关键操作前主动 ping，3s 内无 ack 返回 503
+      operationId: probeAccount
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 探活成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ackedAt: { type: string, format: date-time }
+                  rttMs: { type: integer }
+        '503':
+          description: 3s 内未收到 ack
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/accounts/check-whatsapp:
+    post:
+      tags: [status]
+      summary: 检查手机号是否 WA 用户
+      operationId: checkWhatsApp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountId, phones]
+              properties:
+                accountId: { type: string }
+                phones:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: 检查结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        phone: { type: string }
+                        jid: { type: string }
+                        exists: { type: boolean }
+
+  # ──────────────────── A.4 账号风控查询 ────────────────────
+  /v1/accounts/{accountId}/restriction:
+    get:
+      tags: [restriction]
+      summary: 查 reachoutTimelock 状态
+      description: Baileys `sock.fetchAccountReachoutTimelock()`
+      operationId: getRestriction
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 风控状态
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RestrictionState' }
+
+  /v1/accounts/{accountId}/message-cap:
+    get:
+      tags: [restriction]
+      summary: 查新 chat 配额（拉群配额）
+      description: Baileys `sock.fetchNewChatMessageCap()`
+      operationId: getMessageCap
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 配额状态
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageCapState' }
+
+  /v1/accounts/{accountId}/usability:
+    get:
+      tags: [restriction]
+      summary: 业务可用性综合判定（业务侧下发任务前调一个就够）
+      operationId: getUsability
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 业务可用性
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UsabilityState' }
+
+  # ──────────────────── A.11 代理 ────────────────────
+  /v1/accounts/{accountId}/proxy/bind:
+    post:
+      tags: [proxy]
+      summary: 绑定 proxy session（首次或重新分配）
+      operationId: bindProxy
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProxyBinding' }
+      responses:
+        '200':
+          description: 绑定成功
+
+  /v1/accounts/{accountId}/proxy/rebind:
+    post:
+      tags: [proxy]
+      summary: 重建 socket，agent 新构造（PROXY_FAILED 处理）
+      operationId: rebindProxy
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProxyBinding' }
+      responses:
+        '200':
+          description: 已重建
+
+  /v1/accounts/{accountId}/proxy:
+    get:
+      tags: [proxy]
+      summary: 当前代理绑定信息
+      operationId: getProxy
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 代理绑定信息
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProxyBindingResult' }
+
+  # ──────────────────── A.5 群组（P0 部分完整） ────────────────────
+  /v1/groups/create:
+    post:
+      tags: [groups]
+      summary: 创建群
+      operationId: groupCreate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountId, subject, participants]
+              properties:
+                accountId: { type: string }
+                subject:
+                  type: string
+                  maxLength: 100
+                participants:
+                  type: array
+                  items: { type: string, example: "918094787585" }
+      responses:
+        '200':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  groupJid: { type: string }
+                  results: { $ref: '#/components/schemas/GroupParticipantResults' }
+
+  /v1/groups/{groupJid}/participants/add:
+    post:
+      tags: [groups]
+      summary: 拉人进群（核心接口）
+      operationId: groupParticipantAdd
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountId, participants]
+              properties:
+                accountId: { type: string }
+                participants:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: 每个成员的结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupParticipantResults' }
+
+  /v1/groups/{groupJid}/metadata:
+    get:
+      tags: [groups]
+      summary: 群详情
+      operationId: groupMetadata
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+        - in: query
+          name: accountId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 群详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupMetadata' }
+
+  /v1/groups/{groupJid}/participants:
+    get:
+      tags: [groups]
+      summary: 群成员列表
+      operationId: groupParticipants
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+        - in: query
+          name: accountId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 成员列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/GroupParticipant' }
+
+  # ──────────────────── A.5 群组（P1/P2 完整 schema） ────────────────────
+  /v1/groups/{groupJid}/participants/remove:
+    post:
+      tags: [groups]
+      summary: 移除群成员
+      description: Baileys `groupParticipantsUpdate(jid, p, 'remove')`
+      operationId: groupParticipantRemove
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ParticipantsActionBody' }
+      responses:
+        '200':
+          description: 每个成员的结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupParticipantResults' }
+        '403':
+          description: 当前账号不是管理员
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/groups/{groupJid}/participants/promote:
+    post:
+      tags: [groups]
+      summary: 设为管理员
+      description: Baileys `groupParticipantsUpdate(jid, p, 'promote')`
+      operationId: groupParticipantPromote
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ParticipantsActionBody' }
+      responses:
+        '200':
+          description: 操作结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupParticipantResults' }
+
+  /v1/groups/{groupJid}/participants/demote:
+    post:
+      tags: [groups]
+      summary: 取消管理员
+      description: Baileys `groupParticipantsUpdate(jid, p, 'demote')`
+      operationId: groupParticipantDemote
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ParticipantsActionBody' }
+      responses:
+        '200':
+          description: 操作结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupParticipantResults' }
+
+  /v1/accounts/{accountId}/groups:
+    get:
+      tags: [groups]
+      summary: 当前账号所有群列表
+      description: Baileys `groupFetchAllParticipating()`
+      operationId: groupsListForAccount
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 群列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  groups:
+                    type: array
+                    items: { $ref: '#/components/schemas/GroupListItem' }
+
+  /v1/groups/{groupJid}/subject:
+    post:
+      tags: [groups]
+      summary: 改群名
+      description: Baileys `groupUpdateSubject(jid, name)`
+      operationId: groupSubject
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GroupSubjectBody' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupOperationResult' }
+
+  /v1/groups/{groupJid}/description:
+    post:
+      tags: [groups]
+      summary: 改群描述（传 description=null 表示清空）
+      description: Baileys `groupUpdateDescription(jid, desc)`
+      operationId: groupDescription
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GroupDescriptionBody' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupOperationResult' }
+
+  /v1/groups/{groupJid}/picture:
+    post:
+      tags: [groups]
+      summary: 改群头像
+      description: Baileys `updateProfilePicture(jid, image)`
+      operationId: groupPicture
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GroupPictureBody' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupOperationResult' }
+
+  /v1/groups/{groupJid}/invite-code:
+    get:
+      tags: [groups]
+      summary: 获取群邀请 code 和 URL
+      description: Baileys `groupInviteCode(jid)`
+      operationId: groupInviteCode
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+        - in: query
+          name: accountId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 邀请 code
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupInviteCodeResult' }
+
+  /v1/groups/{groupJid}/invite/revoke:
+    post:
+      tags: [groups]
+      summary: 重置邀请 code（旧 code 失效）
+      description: Baileys `groupRevokeInvite(jid)`
+      operationId: groupInviteRevoke
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountId]
+              properties:
+                accountId: { type: string }
+      responses:
+        '200':
+          description: 新邀请 code
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupInviteCodeResult' }
+
+  /v1/groups/join:
+    post:
+      tags: [groups]
+      summary: 通过邀请 code 加入群
+      description: Baileys `groupAcceptInvite(code)`
+      operationId: groupJoin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GroupJoinBody' }
+      responses:
+        '200':
+          description: 加入成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  groupJid: { type: string }
+                  joined: { type: boolean }
+        '403':
+          description: 邀请 code 失效 / 群已满 / 被拉黑
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/groups/{groupJid}/leave:
+    post:
+      tags: [groups]
+      summary: 退群
+      description: Baileys `groupLeave(jid)`
+      operationId: groupLeave
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountId]
+              properties:
+                accountId: { type: string }
+      responses:
+        '200':
+          description: 退群成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupOperationResult' }
+
+  /v1/groups/{groupJid}/settings/announcement:
+    post:
+      tags: [groups]
+      summary: 设置仅管理员发言 / 允许成员发言
+      description: Baileys `groupSettingUpdate(jid, 'announcement' | 'not_announcement')`
+      operationId: groupSettingAnnouncement
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GroupAnnouncementBody' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupOperationResult' }
+
+  /v1/groups/{groupJid}/settings/locked:
+    post:
+      tags: [groups]
+      summary: 锁/解锁群信息（仅管理员可改群名/描述/头像）
+      description: Baileys `groupSettingUpdate(jid, 'locked' | 'unlocked')`
+      operationId: groupSettingLocked
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GroupLockedBody' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupOperationResult' }
+
+  /v1/groups/{groupJid}/settings/member-add-mode:
+    post:
+      tags: [groups]
+      summary: 设置非管理员是否可以拉人入群
+      description: Baileys `groupMemberAddMode(jid, mode)`
+      operationId: groupMemberAddMode
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GroupMemberAddModeBody' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupOperationResult' }
+
+  /v1/groups/{groupJid}/settings/join-approval:
+    post:
+      tags: [groups]
+      summary: 入群审批开关
+      description: Baileys `groupJoinApprovalMode(jid, 'on' | 'off')`
+      operationId: groupJoinApproval
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GroupJoinApprovalBody' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupOperationResult' }
+
+  /v1/groups/{groupJid}/pending:
+    get:
+      tags: [groups]
+      summary: 待审批入群成员列表
+      description: Baileys `groupRequestParticipantsList(jid)`
+      operationId: groupPending
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+        - in: query
+          name: accountId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 待审批列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  pending:
+                    type: array
+                    items: { $ref: '#/components/schemas/PendingParticipant' }
+
+  /v1/groups/{groupJid}/pending/approve:
+    post:
+      tags: [groups]
+      summary: 批准入群申请
+      description: Baileys `groupRequestParticipantsUpdate(jid, p, 'approve')`
+      operationId: groupPendingApprove
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ParticipantsActionBody' }
+      responses:
+        '200':
+          description: 操作结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupParticipantResults' }
+
+  /v1/groups/{groupJid}/pending/reject:
+    post:
+      tags: [groups]
+      summary: 拒绝入群申请
+      description: Baileys `groupRequestParticipantsUpdate(jid, p, 'reject')`
+      operationId: groupPendingReject
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ParticipantsActionBody' }
+      responses:
+        '200':
+          description: 操作结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupParticipantResults' }
+
+  # ──────────────────── A.6 消息（P1/P2 完整 schema） ────────────────────
+  /v1/messages/text:
+    post:
+      tags: [messages]
+      summary: 发送文本消息
+      description: "Baileys `sendMessage(jid, { text })`"
+      operationId: messageText
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TextMessageBody' }
+      responses:
+        '200':
+          description: 发送成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageSendResult' }
+        '503':
+          description: 账号不可用（OFFLINE / NEED_REAUTH / restriction active）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/messages/image:
+    post:
+      tags: [messages]
+      summary: 发送图片
+      description: "Baileys `sendMessage(jid, { image, caption })`"
+      operationId: messageImage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ImageMessageBody' }
+      responses:
+        '200':
+          description: 发送成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageSendResult' }
+
+  /v1/messages/audio:
+    post:
+      tags: [messages]
+      summary: 发送音频（含 ptt 语音消息）
+      description: "Baileys `sendMessage(jid, { audio, mimetype, ptt })`"
+      operationId: messageAudio
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AudioMessageBody' }
+      responses:
+        '200':
+          description: 发送成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageSendResult' }
+
+  /v1/messages/video:
+    post:
+      tags: [messages]
+      summary: 发送视频
+      description: "Baileys `sendMessage(jid, { video, caption })`"
+      operationId: messageVideo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VideoMessageBody' }
+      responses:
+        '200':
+          description: 发送成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageSendResult' }
+
+  /v1/messages/document:
+    post:
+      tags: [messages]
+      summary: 发送文档
+      description: "Baileys `sendMessage(jid, { document, mimetype, fileName })`"
+      operationId: messageDocument
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DocumentMessageBody' }
+      responses:
+        '200':
+          description: 发送成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageSendResult' }
+
+  /v1/messages/location:
+    post:
+      tags: [messages]
+      summary: 发送地理位置
+      description: "Baileys `sendMessage(jid, { location })`"
+      operationId: messageLocation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LocationMessageBody' }
+      responses:
+        '200':
+          description: 发送成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageSendResult' }
+
+  /v1/messages/contact-card:
+    post:
+      tags: [messages]
+      summary: 发送名片（VCARD）
+      description: "Baileys `sendMessage(jid, { contacts })`"
+      operationId: messageContactCard
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContactCardMessageBody' }
+      responses:
+        '200':
+          description: 发送成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageSendResult' }
+
+  /v1/messages/link:
+    post:
+      tags: [messages]
+      summary: 发送链接（带预览）
+      description: 等同 text 消息，协议层自动抓取 URL 预览
+      operationId: messageLink
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LinkMessageBody' }
+      responses:
+        '200':
+          description: 发送成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageSendResult' }
+
+  /v1/messages/reaction:
+    post:
+      tags: [messages]
+      summary: 给消息加 / 移除表情反应
+      description: "Baileys `sendMessage(jid, { react: { text, key } })`"
+      operationId: messageReaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReactionMessageBody' }
+      responses:
+        '200':
+          description: 反应已发送
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageSendResult' }
+
+  /v1/messages/delete:
+    post:
+      tags: [messages]
+      summary: 撤回消息
+      description: "Baileys `sendMessage(jid, { delete: key })`"
+      operationId: messageDelete
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeleteMessageBody' }
+      responses:
+        '200':
+          description: 撤回成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageSendResult' }
+        '403':
+          description: 超过撤回时限（WA 默认 ~2h）或消息不属于当前账号
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/messages/forward:
+    post:
+      tags: [messages]
+      summary: 转发消息
+      description: "Baileys `sendMessage(jid, { forward: msg })`"
+      operationId: messageForward
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ForwardMessageBody' }
+      responses:
+        '200':
+          description: 转发成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageSendResult' }
+
+  /v1/messages/read:
+    post:
+      tags: [messages]
+      summary: 标记消息已读
+      description: "Baileys `readMessages([key])`"
+      operationId: messageRead
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReadMessagesBody' }
+      responses:
+        '200':
+          description: 已标记
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count: { type: integer }
+
+  /v1/messages/typing:
+    post:
+      tags: [messages]
+      summary: 输入中 / 录音中 状态
+      description: |
+        Baileys `sendPresenceUpdate(state, jid)`。
+        composing = 输入中；recording = 录音中；paused = 停止；
+        available/unavailable = 全局在线状态（不限定 jid）
+      operationId: messageTyping
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TypingPresenceBody' }
+      responses:
+        '200':
+          description: 已发送
+
+  /v1/messages/{messageId}/download:
+    post:
+      tags: [messages]
+      summary: 按需下载消息媒体
+      description: |
+        Baileys `downloadMediaMessage(msg, 'buffer')`。
+        协议层只负责按需下载 WhatsApp 媒体并返回 `base64` 或 `stream`。
+        长期存储、对象存储上传、CDN URL 和生命周期由业务层负责。
+      operationId: messageDownload
+      parameters:
+        - in: path
+          name: messageId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DownloadMediaBody' }
+      responses:
+        '200':
+          description: 下载成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DownloadMediaResult' }
+        '404':
+          description: 消息不存在或媒体已过期（WA 服务端 14 天）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/messages/status:
+    post:
+      tags: [messages]
+      summary: 发送 status（动态）广播
+      description: |
+        Baileys `sendMessage('status@broadcast', content, { statusJidList })`。
+        content 可以是文本/图片/视频。statusJidList 限定可见联系人。
+      operationId: messageStatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatusBroadcastBody' }
+      responses:
+        '200':
+          description: 动态已发布
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageSendResult' }
+
+  # ──────────────────── A.7 联系人 / 聊天（占位） ────────────────────
+  /v1/contacts/{jid}/save:
+    post: { tags: [contacts], summary: "[P2] 添加/编辑联系人", operationId: contactSave, parameters: [{ in: path, name: jid, required: true, schema: { type: string } }], responses: { '200': { description: ok } } }
+  /v1/contacts/{jid}:
+    delete: { tags: [contacts], summary: "[P2] 删除联系人", operationId: contactDelete, parameters: [{ in: path, name: jid, required: true, schema: { type: string } }], responses: { '200': { description: ok } } }
+  /v1/contacts/{jid}/block:
+    post: { tags: [contacts], summary: "[P2] 拉黑", operationId: contactBlock, parameters: [{ in: path, name: jid, required: true, schema: { type: string } }], responses: { '200': { description: ok } } }
+  /v1/contacts/{jid}/unblock:
+    post: { tags: [contacts], summary: "[P2] 取消拉黑", operationId: contactUnblock, parameters: [{ in: path, name: jid, required: true, schema: { type: string } }], responses: { '200': { description: ok } } }
+  /v1/chats/{jid}/mute:
+    post: { tags: [contacts], summary: "[P2] 静音", operationId: chatMute, parameters: [{ in: path, name: jid, required: true, schema: { type: string } }], responses: { '200': { description: ok } } }
+  /v1/chats/{jid}/clear:
+    post: { tags: [contacts], summary: "[P2] 清空聊天", operationId: chatClear, parameters: [{ in: path, name: jid, required: true, schema: { type: string } }], responses: { '200': { description: ok } } }
+  /v1/chats/{jid}/delete:
+    post: { tags: [contacts], summary: "[P2] 删除会话", operationId: chatDelete, parameters: [{ in: path, name: jid, required: true, schema: { type: string } }], responses: { '200': { description: ok } } }
+  /v1/chats/{jid}/archive:
+    post: { tags: [contacts], summary: "[P2] 归档", operationId: chatArchive, parameters: [{ in: path, name: jid, required: true, schema: { type: string } }], responses: { '200': { description: ok } } }
+  /v1/chats/{jid}/pin:
+    post: { tags: [contacts], summary: "[P2] 置顶", operationId: chatPin, parameters: [{ in: path, name: jid, required: true, schema: { type: string } }], responses: { '200': { description: ok } } }
+  /v1/chats/{jid}/mark-read:
+    post: { tags: [contacts], summary: "[P2] 标记已读", operationId: chatMarkRead, parameters: [{ in: path, name: jid, required: true, schema: { type: string } }], responses: { '200': { description: ok } } }
+
+  # ──────────────────── A.8/A.9 资料 + Business（占位） ────────────────────
+  /v1/profile/name:
+    post: { tags: [profile], summary: "[P2] 改昵称", operationId: profileName, responses: { '200': { description: ok } } }
+  /v1/profile/status:
+    post: { tags: [profile], summary: "[P2] 改签名", operationId: profileStatus, responses: { '200': { description: ok } } }
+  /v1/profile/picture:
+    post: { tags: [profile], summary: "[P2] 改头像", operationId: profilePictureSet, responses: { '200': { description: ok } } }
+    delete: { tags: [profile], summary: "[P2] 移除头像", operationId: profilePictureRemove, responses: { '200': { description: ok } } }
+  /v1/profile/{jid}/picture-url:
+    get: { tags: [profile], summary: "[P2] 获取他人头像 URL", operationId: profilePictureUrl, parameters: [{ in: path, name: jid, required: true, schema: { type: string } }], responses: { '200': { description: ok } } }
+
+  # ──────────────────── A.9 Business 资料（P3 完整 schema） ────────────────────
+  /v1/profile/business/{jid}:
+    get:
+      tags: [business]
+      summary: 获取 Business profile（catalog/hours/category/address）
+      description: |
+        Baileys `sock.getBusinessProfile(jid)`.
+        **如果 jid 对应账号不是 Business 号，返回 null（200，body 为空对象）**。
+        业务侧可以用此判断他人账号是否 Business：
+          if (response.profile == null) → 个人号
+          if (response.profile != null) → Business 号
+      operationId: businessProfileGet
+      parameters:
+        - in: path
+          name: jid
+          required: true
+          schema: { type: string }
+        - in: query
+          name: accountId
+          required: true
+          description: 查询者账号
+          schema: { type: string }
+      responses:
+        '200':
+          description: Business profile 或 null
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jid: { type: string }
+                  isBusiness: { type: boolean }
+                  profile:
+                    type: object
+                    nullable: true
+                    description: 个人号此字段为 null
+                    properties:
+                      wid: { type: string }
+                      description: { type: string, nullable: true }
+                      website:
+                        type: array
+                        items: { type: string }
+                      email: { type: string, nullable: true }
+                      address: { type: string, nullable: true }
+                      category: { type: string, nullable: true }
+                      businessHours:
+                        type: object
+                        nullable: true
+                        properties:
+                          timezone: { type: string }
+                          config:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                day_of_week: { type: string }
+                                mode: { type: string, enum: [open_24h, closed, specific_hours] }
+                                open_time: { type: integer, nullable: true }
+                                close_time: { type: integer, nullable: true }
+
+  /v1/profile/business/update:
+    post:
+      tags: [business]
+      summary: 更新自己的 Business profile
+      description: |
+        Baileys `updateBussinesProfile(...)` （注意 Baileys 拼写：Bussines）。
+        **必须是 Business 号才能调**。个人号调用返回 422。
+      operationId: businessProfileUpdate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BusinessProfileUpdateBody' }
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+        '422':
+          description: 账号不是 Business 号
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/business/catalog:
+    get:
+      tags: [business]
+      summary: 获取 Business catalog（商品列表）
+      description: Baileys `getCatalog({ jid, limit, cursor })`
+      operationId: businessCatalog
+      parameters:
+        - in: query
+          name: accountId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: jid
+          required: true
+          description: 目标 Business 账号 jid（可以是自己也可以是其他 Business）
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20, maximum: 100 }
+        - in: query
+          name: cursor
+          description: 上次返回的 nextCursor，首次留空
+          schema: { type: string }
+      responses:
+        '200':
+          description: 商品列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CatalogResult' }
+        '422':
+          description: 目标账号不是 Business 号
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/business/product:
+    post:
+      tags: [business]
+      summary: 创建 / 更新 / 删除商品
+      description: |
+        Baileys `productCreate / productUpdate / productDelete`，按 action 分流。
+        **必须是 Business 号才能调**。
+      operationId: businessProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductMutationBody' }
+      responses:
+        '200':
+          description: 操作成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductMutationResult' }
+        '422':
+          description: 账号不是 Business 号
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  # ──────────────────── A.10 频道 newsletter（P3 完整 schema） ────────────────────
+  /v1/channels/follow:
+    post:
+      tags: [channels]
+      summary: 订阅频道
+      description: Baileys `newsletterFollow(jid)`
+      operationId: channelFollow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelOpBody' }
+      responses:
+        '200':
+          description: 已订阅
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  jid: { type: string }
+
+  /v1/channels/unfollow:
+    post:
+      tags: [channels]
+      summary: 取消订阅频道
+      description: Baileys `newsletterUnfollow(jid)`
+      operationId: channelUnfollow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelOpBody' }
+      responses:
+        '200':
+          description: 已取消订阅
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  jid: { type: string }
+
+  /v1/channels/{jid}/messages:
+    get:
+      tags: [channels]
+      summary: 获取频道历史消息
+      description: Baileys `newsletterFetchMessages(jid, count, since, after)`
+      operationId: channelMessages
+      parameters:
+        - in: path
+          name: jid
+          required: true
+          schema: { type: string }
+        - in: query
+          name: accountId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: count
+          description: 拉取条数
+          schema: { type: integer, default: 50, maximum: 200 }
+        - in: query
+          name: since
+          description: unix 时间戳（秒），仅返回此时间之后的消息
+          schema: { type: integer }
+        - in: query
+          name: after
+          description: 频道内部 serverId 游标
+          schema: { type: string }
+      responses:
+        '200':
+          description: 频道消息列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelMessageList' }
+
+  /v1/channels/{jid}/reaction:
+    post:
+      tags: [channels]
+      summary: 给频道消息加 / 移除表情反应
+      description: Baileys `newsletterReactMessage(jid, serverId, reaction)`
+      operationId: channelReaction
+      parameters:
+        - in: path
+          name: jid
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelReactionBody' }
+      responses:
+        '200':
+          description: 反应已发送
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+
+  # ──────────────────── Admin 运维 / 诊断（仅内网） ────────────────────
+  /v1/admin/sync-load:
+    post:
+      tags: [admin]
+      summary: 手动硬同步本 worker 的 Registry load
+      description: |
+        把本 worker 的 activeSize 强制 HSET 覆盖到 Registry load hash。
+        正常生产**不需要**调用 — 协议层每 90s/每小时会自动硬同步。
+        仅在排查"Registry load 与真实账号数偏差大"时手动调一次。
+      operationId: adminSyncLoad
+      responses:
+        '200':
+          description: 已同步
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workerId: { type: string }
+                  registryLoadBefore: { type: integer }
+                  registryLoadAfter: { type: integer }
+                  driftCorrected: { type: integer }
+                  syncedAt: { type: string, format: date-time }
+
+  /v1/admin/workers:
+    get:
+      tags: [admin]
+      summary: 列 worker 集群
+      operationId: adminListWorkers
+      parameters:
+        - in: query
+          name: includeDead
+          schema: { type: boolean, default: false }
+          description: 是否包含心跳超时的 worker（默认仅活着的）
+      responses:
+        '200':
+          description: worker 列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  currentWorkerId: { type: string }
+                  workers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        workerId: { type: string }
+                        nodeId: { type: string }
+                        region: { type: string }
+                        capacity: { type: integer }
+                        currentLoad: { type: integer }
+                        endpoint: { type: string }
+                        registeredAt: { type: integer }
+
+  /v1/admin/dead-workers:
+    get:
+      tags: [admin]
+      summary: 列出心跳超时的 worker
+      operationId: adminListDeadWorkers
+      parameters:
+        - in: query
+          name: thresholdMs
+          schema: { type: integer, default: 60000 }
+      responses:
+        '200':
+          description: dead worker ID 列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  thresholdMs: { type: integer }
+                  deadWorkerIds:
+                    type: array
+                    items: { type: string }
+                  checkedAt: { type: string, format: date-time }
+
+  /v1/admin/accounts:
+    get:
+      tags: [admin]
+      summary: 本 worker 账号视图（运维诊断）
+      operationId: adminListAccounts
+      responses:
+        '200':
+          description: 账号摘要 + 前 50 个详情
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workerId: { type: string }
+                  activeSize: { type: integer }
+                  totalSize: { type: integer }
+                  sample:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+
+  /v1/admin/unassign:
+    post:
+      tags: [admin]
+      summary: 手动解除账号 Registry 绑定（兜底）
+      operationId: adminUnassign
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountId]
+              properties:
+                accountId: { type: string }
+                releaseSlot:
+                  type: boolean
+                  default: true
+                  description: |
+                    是否同时扣减 Registry load。业务侧收到 account.need_reauth 后确认彻底放弃账号时保持 true；
+                    只有确认该账号的 Registry load 已经被其它流程扣过时才传 false。
+      responses:
+        '200':
+          description: 已解除
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accountId: { type: string }
+                  unassigned: { type: boolean }
+                  releaseSlot: { type: boolean }
+
+
+components:
+  parameters:
+    AccountIdPath:
+      in: path
+      name: accountId
+      required: true
+      schema: { type: string }
+      example: "acc_001"
+    GroupJidPath:
+      in: path
+      name: groupJid
+      required: true
+      schema: { type: string, pattern: '^[0-9-]+@g\.us$' }
+      example: "120363424367770097@g.us"
+
+  schemas:
+    # ──── 通用 ────
+    ErrorResponse:
+      type: object
+      properties:
+        code: { type: string }
+        message: { type: string }
+        evidence: { $ref: '#/components/schemas/Evidence' }
+        details:
+          type: object
+          additionalProperties: true
+          description: |
+            错误详情。`NOT_OWNER` 时包含 accountId/currentWorkerId/ownerWorkerId/ownerEndpoint，
+            业务层应刷新 owner 后直连 ownerEndpoint 重试一次。
+
+    Evidence:
+      type: object
+      description: 状态来源证据（详见 § 4.7.1 三层证据模型）
+      properties:
+        wsOpen: { type: boolean }
+        connectionField:
+          type: string
+          enum: [connecting, open, close]
+        lastDateRecv: { type: string, format: date-time }
+        lastPingAckAt: { type: string, format: date-time }
+        ageMs: { type: integer }
+        keepAliveIntervalMs: { type: integer, example: 30000 }
+        slotReleased:
+          type: boolean
+          description: true 表示该账号当前不占 worker 在线容量
+        reason:
+          type: string
+          nullable: true
+          description: slotReleased 或状态变更原因
+        updatedAt:
+          type: string
+          format: date-time
+          description: runtime 状态更新时间
+
+    RoutingInfo:
+      type: object
+      required: [ownerWorkerId, currentWorkerId, local]
+      properties:
+        ownerWorkerId:
+          type: string
+          description: accountId 当前归属 worker
+        ownerEndpoint:
+          type: string
+          nullable: true
+          description: 业务层可直连的 worker 地址；由 worker 的 PUBLIC_ENDPOINT 注册
+        currentWorkerId:
+          type: string
+          description: 当前响应请求的 worker
+        local:
+          type: boolean
+          description: true 表示当前 worker 就是 owner
+
+    OwnerResolution:
+      allOf:
+        - $ref: '#/components/schemas/RoutingInfo'
+        - type: object
+          required: [accountId, assigned, resolvedAt]
+          properties:
+            accountId: { type: string }
+            assigned:
+              type: boolean
+              description: false 表示账号尚未分配 owner
+            resolvedAt: { type: string, format: date-time }
+
+    # ──── 代理 ────
+    ProxyBinding:
+      type: object
+      required: [protocol, url, sessionId, country]
+      properties:
+        protocol:
+          type: string
+          enum: [socks5, http]
+        url:
+          type: string
+          description: 完整代理 URL（含 session 参数），例如 `socks5://brd-customer-XXX-zone-residential-session-acc_001-country-us:PASS@proxy.example.com:22225`
+        sessionId:
+          type: string
+          description: 持久绑定账号一辈子的 session ID
+        provider:
+          type: string
+          enum: [bright_data, smartproxy, iproyal, custom]
+        country: { type: string, example: "US" }
+        region: { type: string, nullable: true }
+        asn: { type: string, nullable: true, example: "AS7922" }
+        tier:
+          type: string
+          enum: [pairing, standard]
+        stickyDurationSec: { type: integer, example: 600 }
+
+    ProxyBindingResult:
+      allOf:
+        - $ref: '#/components/schemas/ProxyBinding'
+        - type: object
+          properties:
+            boundAt: { type: string, format: date-time }
+            lastRotatedAt: { type: string, format: date-time }
+            status:
+              type: string
+              enum: [active, migrating, blacklisted, dead]
+
+    DeviceProfile:
+      type: object
+      description: |
+        账号设备元数据。用于功能层筛选、统计、导出和联调展示。
+        关联设备展示名请使用 BrowserDisplay。
+      required: [accountId, platform, source, deviceCompanion, updatedAt]
+      properties:
+        accountId: { type: string }
+        platform:
+          type: string
+          enum: [windows, macos, linux, unknown]
+          description: 功能层选择或导入材料推断出的桌面设备平台
+        source:
+          type: string
+          enum: [import_body, creds_platform, params_fields, six_fields, legacy_json, unknown]
+          description: 设备信息来源
+        manufacturer: { type: string, nullable: true, example: Apple }
+        model: { type: string, nullable: true, example: MacBook Pro }
+        osVersion: { type: string, nullable: true, example: "14.4.1" }
+        device: { type: string, nullable: true, example: MacBookPro18,3 }
+        deviceUUID: { type: string, nullable: true }
+        phoneUUID: { type: string, nullable: true }
+        whatsappVersion: { type: string, nullable: true, example: "2.24.10.79" }
+        wsDeviceId:
+          type: integer
+          nullable: true
+          description: sixLogin 分身设备 ID；主设备通常为 0
+        deviceCompanion:
+          type: boolean
+          description: 是否分身/伴随设备元数据
+        note:
+          type: string
+          nullable: true
+          example: metadata only; does not change Baileys socket browser fingerprint
+        updatedAt: { type: string, format: date-time }
+
+    BrowserDisplay:
+      type: object
+      description: |
+        WhatsApp 手机端"已关联设备"里的浏览器展示名。
+        协议层会映射为 Baileys browser tuple，例如 `['iOS', 'Opera', '17.5']`，
+        手机端可能显示为 `Opera (iOS)`。这只是 Web companion 展示信息，
+        不代表协议层运行了真实 Opera 内核或原生 iOS/Android 协议。
+      required: [browserName, platform]
+      properties:
+        accountId: { type: string }
+        browserName:
+          type: string
+          example: Opera
+          description: 浏览器展示名，如 Chrome / Opera / Edge / Safari / Firefox
+        platform:
+          type: string
+          enum: [windows, macos, linux, ios, android, unknown]
+          example: ios
+          description: 关联设备展示平台
+        version:
+          type: string
+          nullable: true
+          example: "17.5"
+        updatedAt: { type: string, format: date-time }
+
+    # ──── Apifox 三类登录 ────
+    ParamsLoginBody:
+      type: object
+      required: [wid, proxy]
+      properties:
+        wid:
+          type: string
+          description: 手机号
+        cc: { type: string, nullable: true }
+        clientStaticPrivateKey: { type: string }
+        clientStaticPublicKey: { type: string }
+        country: { type: string, nullable: true }
+        device: { type: string, nullable: true }
+        deviceUUID: { type: string, nullable: true }
+        identityPrivateKey: { type: string }
+        identityPublicKey: { type: string }
+        language: { type: string, nullable: true }
+        manufacturer: { type: string, nullable: true }
+        mcc: { type: string, nullable: true }
+        mnc: { type: string, nullable: true }
+        osBuildNumber: { type: string, nullable: true }
+        osVersion: { type: string, nullable: true }
+        phoneUUID: { type: string, nullable: true }
+        qrId:
+          type: string
+          nullable: true
+          description: 业务侧 ID（兼容 Apifox）
+        registrationID: { type: integer }
+        roProductBoard: { type: string, nullable: true }
+        roProductDevice: { type: string, nullable: true }
+        signPreKeyID: { type: integer }
+        signPreKeyPrivateKey: { type: string }
+        signPreKeyPublicKey: { type: string }
+        signPreKeySignature: { type: string }
+        vip:
+          type: boolean
+          description: 是否商业号（仅作为初始猜测）
+        whatsappVersion: { type: string, nullable: true }
+        proxy: { $ref: '#/components/schemas/ProxyBinding' }
+        autoOnline: { type: boolean, default: true }
+        deviceProfile:
+          $ref: '#/components/schemas/DeviceProfile'
+        browserDisplay:
+          $ref: '#/components/schemas/BrowserDisplay'
+
+    SixLoginBody:
+      type: object
+      required: [wid, clientStaticPrivateKey, clientStaticPublicKey, identityPrivateKey, identityPublicKey, proxy]
+      properties:
+        wid: { type: string }
+        cc: { type: string, nullable: true }
+        clientStaticPrivateKey: { type: string }
+        clientStaticPublicKey: { type: string }
+        identityPrivateKey: { type: string }
+        identityPublicKey: { type: string }
+        deviceIdentityKey:
+          type: string
+          description: 分身设备身份密钥 ADVSignedDeviceIdentity protobuf base64
+        phoneId: { type: string, nullable: true }
+        operator: { type: string, nullable: true }
+        wsDeviceId:
+          type: integer
+          default: 0
+          description: 主设备=0，分身设备=20+
+        qrId: { type: string, nullable: true }
+        vip: { type: boolean }
+        proxy: { $ref: '#/components/schemas/ProxyBinding' }
+        autoOnline: { type: boolean, default: true }
+        deviceProfile:
+          $ref: '#/components/schemas/DeviceProfile'
+        browserDisplay:
+          $ref: '#/components/schemas/BrowserDisplay'
+
+    LegacyJsonLoginBody:
+      type: object
+      required: [accountJsonBase64, proxy]
+      properties:
+        accountJsonBase64:
+          type: string
+          description: base64 编码的旧 JSON 凭据
+        qrId: { type: string, nullable: true }
+        proxy: { $ref: '#/components/schemas/ProxyBinding' }
+        autoOnline: { type: boolean, default: true }
+        deviceProfile:
+          $ref: '#/components/schemas/DeviceProfile'
+        browserDisplay:
+          $ref: '#/components/schemas/BrowserDisplay'
+
+    # ──── Baileys & 便携 JSON ────
+    BaileysAuthState:
+      type: object
+      required: [creds, keys]
+      properties:
+        schema:
+          type: string
+          example: "baileys.auth_state.v1"
+        creds:
+          type: object
+          additionalProperties: true
+          description: 完整 Baileys creds（noiseKey/signedIdentityKey/registrationId/advSecretKey/me/account/...）
+        keys:
+          type: object
+          additionalProperties: true
+          description: pre-key / session / sender-key / app-state-sync-key / sender-key-memory
+
+    FlatCredsExport:
+      type: object
+      additionalProperties: true
+      description: |
+        竞品兼容的平铺 creds JSON。顶层包含 `me`、`Phone`、`account`、`noiseKey`、`signedPreKey`、
+        `registrationId`、`advSecretKey`、`platform` 等 Baileys creds 字段；Buffer-like 字段统一输出为
+        `{ "type": "Buffer", "data": "<base64>" }`。
+      properties:
+        me:
+          type: object
+          additionalProperties: true
+          example:
+            id: "919378147380:10@s.whatsapp.net"
+            lid: "189022232154352:10@lid"
+            name: "hy"
+        Phone:
+          type: string
+          example: "919378147380"
+        account:
+          type: object
+          additionalProperties: true
+        noiseKey:
+          type: object
+          additionalProperties: true
+        signedPreKey:
+          type: object
+          additionalProperties: true
+        registrationId:
+          type: integer
+        advSecretKey:
+          type: string
+        platform:
+          type: string
+
+    PortableExport:
+      type: object
+      required: [baileys, account]
+      properties:
+        schema:
+          type: string
+          example: "unsea.portable.v1"
+        exportedAt: { type: string, format: date-time }
+        baileys: { $ref: '#/components/schemas/BaileysAuthState' }
+        account:
+          type: object
+          properties:
+            phone: { type: string }
+            jid: { type: string }
+            accountType:
+              type: string
+              enum: [PERSONAL, BUSINESS_STANDARD, BUSINESS_VERIFIED]
+            platform: { type: string }
+            verifiedName: { type: string, nullable: true }
+            pushName: { type: string, nullable: true }
+            pairedAt: { type: string, format: date-time }
+        deviceProfile:
+          $ref: '#/components/schemas/DeviceProfile'
+        browserDisplay:
+          $ref: '#/components/schemas/BrowserDisplay'
+        proxy: { $ref: '#/components/schemas/ProxyBinding' }
+        legacy:
+          type: object
+          properties:
+            qrId: { type: string }
+            ipManageId: { type: string }
+
+    BatchExportResult:
+      type: object
+      properties:
+        total: { type: integer }
+        succeeded: { type: integer }
+        failed: { type: integer }
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              accountId: { type: string }
+              success: { type: boolean }
+              data:
+                oneOf:
+                  - $ref: '#/components/schemas/BaileysAuthState'
+                  - $ref: '#/components/schemas/PortableExport'
+                  - $ref: '#/components/schemas/FlatCredsExport'
+              error: { type: string }
+
+    ImportResult:
+      type: object
+      required: [result, accountId]
+      properties:
+        result:
+          type: string
+          enum:
+            - IMPORTED_ONLINE
+            - IMPORTED_OFFLINE
+            - CONVERTED_FULL
+            - CONVERTED_PARTIAL
+            - NEED_REAUTH
+            - UNSUPPORTED_FORMAT
+            - INVALID_CREDENTIAL
+            - ASSIGNED_REMOTE
+          description: |
+            `ASSIGNED_REMOTE` 仅在批量导入中出现，表示 creds/proxy 已保存且账号已分配到远端 owner，
+            当前 worker 不会拉 socket；业务层应按 `routing.ownerEndpoint` 分组调用 owner。
+        accountId: { type: string }
+        phone: { type: string }
+        jid: { type: string }
+        accountType:
+          type: string
+          enum: [PERSONAL, BUSINESS_STANDARD, BUSINESS_VERIFIED, UNKNOWN]
+          description: |
+            导入时类型识别结果。
+            - 来自 baileys-json：直接读 creds.platform + creds.me.name
+            - 来自 paramsLogin/sixLogin/legacyJson：基于 vip / creds 字段做初始猜测，
+              真正定型要等 online 后 Baileys 与服务端协商完成
+              （此时会 emit account.type_detected 事件）
+            - UNKNOWN：导入时无法判定，等 online
+        businessDetection:
+          $ref: '#/components/schemas/BusinessDetection'
+        deviceProfile:
+          $ref: '#/components/schemas/DeviceProfile'
+        browserDisplay:
+          $ref: '#/components/schemas/BrowserDisplay'
+        convertedFrom:
+          type: string
+          enum: [params, six, legacy_json, baileys_json]
+        warnings:
+          type: array
+          items: { type: string }
+        evidence: { $ref: '#/components/schemas/Evidence' }
+        routing:
+          $ref: '#/components/schemas/RoutingInfo'
+
+    BatchImportItemResult:
+      type: object
+      required: [accountId, result]
+      properties:
+        accountId: { type: string }
+        result:
+          type: string
+          enum:
+            - IMPORTED_ONLINE
+            - IMPORTED_OFFLINE
+            - CONVERTED_FULL
+            - CONVERTED_PARTIAL
+            - ASSIGNED_REMOTE
+            - INVALID_CREDENTIAL
+        error: { type: string }
+        data:
+          $ref: '#/components/schemas/ImportResult'
+
+    BusinessDetection:
+      type: object
+      description: |
+        账号类型识别结果与来源。业务侧可用此判断是否调用 Business 专属接口。
+      required: [accountType, source]
+      properties:
+        accountType:
+          type: string
+          enum: [PERSONAL, BUSINESS_STANDARD, BUSINESS_VERIFIED, UNKNOWN]
+        isBusiness:
+          type: boolean
+          description: 是否 Business 号（accountType 以 BUSINESS_ 开头）
+        isVerified:
+          type: boolean
+          description: 是否官方认证 Business（accountType == BUSINESS_VERIFIED，绿色勾）
+        platform:
+          type: string
+          description: 来自 WA creds.platform；这是账号类型识别元字段，不是 deviceProfile 的登录设备平台
+          enum: [android, iphone, web, smba, smbi, unknown]
+        bizName:
+          type: string
+          nullable: true
+          description: 来自 creds.me.name（仅 Business 号 pair-success 时填）
+        verifiedName:
+          type: string
+          nullable: true
+          description: 来自 creds.me.verifiedName，仅官方认证账号才有
+        source:
+          type: string
+          enum: [pair_success, creds_meta, business_profile_query, vip_hint, unknown]
+          description: |
+            pair_success: 首次绑定时从协议握手读出（最权威）
+            creds_meta: 从 creds.platform/me.name 读出（导入时立即可得）
+            business_profile_query: online 后调 getBusinessProfile(selfJid) 兜底
+            vip_hint: 仅来自 paramsLogin/sixLogin 的 vip=true 猜测（不可靠）
+            unknown: 暂未识别
+        detectedAt: { type: string, format: date-time }
+
+    # ──── 状态机 ────
+    AccountStatus:
+      type: object
+      required: [accountId, state, evidence, reportedAt]
+      properties:
+        accountId: { type: string }
+        phone: { type: string }
+        jid: { type: string }
+        lid: { type: string, nullable: true }
+        state:
+          type: string
+          enum:
+            - NEW
+            - IMPORTED
+            - PAIRING
+            - VERIFYING
+            - ONLINE
+            - STALE
+            - OFFLINE
+            - RECONNECTING
+            - PROXY_FAILED
+            - RATE_LIMITED
+            - NEED_REAUTH
+            - LOGGED_OUT
+            - DEVICE_REMOVED
+        evidence: { $ref: '#/components/schemas/Evidence' }
+        needReauth: { type: boolean }
+        reauthReason: { type: string, nullable: true }
+        accountType:
+          type: string
+          enum: [PERSONAL, BUSINESS_STANDARD, BUSINESS_VERIFIED, UNKNOWN]
+        business:
+          $ref: '#/components/schemas/BusinessDetection'
+        deviceProfile:
+          $ref: '#/components/schemas/DeviceProfile'
+        browserDisplay:
+          $ref: '#/components/schemas/BrowserDisplay'
+        accountTypeDetectedAt: { type: string, format: date-time }
+        platform: { type: string }
+        verifiedName: { type: string, nullable: true }
+        pushName: { type: string, nullable: true }
+        currentProxy: { $ref: '#/components/schemas/ProxyBindingResult' }
+        metrics:
+          type: object
+          properties:
+            reconnectCount24h: { type: integer }
+            staleEvents24h: { type: integer }
+            lastDisconnectCode: { type: integer, nullable: true }
+            lastDisconnectReason: { type: string, nullable: true }
+            lastDisconnectSemantic:
+              type: string
+              nullable: true
+              enum: [PROXY_FAILED, RATE_LIMITED, NEED_REAUTH, RECONNECTING, null]
+        workerId: { type: string }
+        reportedAt: { type: string, format: date-time }
+
+    # ──── 风控 ────
+    RestrictionState:
+      type: object
+      required: [accountId, isActive, fetchedAt]
+      properties:
+        accountId: { type: string }
+        isActive: { type: boolean }
+        restrictedUntil: { type: string, format: date-time, nullable: true }
+        enforcementType:
+          type: string
+          enum:
+            - DEFAULT
+            - BIZ_QUALITY
+            - WEB_COMPANION_ONLY
+            - BIZ_COMMERCE_VIOLATION_ALCOHOL
+            - BIZ_COMMERCE_VIOLATION_ADULT
+            - BIZ_COMMERCE_VIOLATION_ANIMALS
+            - BIZ_COMMERCE_VIOLATION_BODY_PARTS_FLUIDS
+            - BIZ_COMMERCE_VIOLATION_DATING
+            - BIZ_COMMERCE_VIOLATION_DIGITAL_SERVICES_PRODUCTS
+            - BIZ_COMMERCE_VIOLATION_DRUGS
+            - BIZ_COMMERCE_VIOLATION_DRUGS_ONLY_OTC
+            - BIZ_COMMERCE_VIOLATION_GAMBLING
+            - BIZ_COMMERCE_VIOLATION_HEALTHCARE
+            - BIZ_COMMERCE_VIOLATION_REAL_FAKE_CURRENCY
+            - BIZ_COMMERCE_VIOLATION_SUPPLEMENTS
+            - BIZ_COMMERCE_VIOLATION_TOBACCO
+            - BIZ_COMMERCE_VIOLATION_VIOLENT_CONTENT
+            - BIZ_COMMERCE_VIOLATION_WEAPONS
+        raw:
+          type: object
+          additionalProperties: true
+        fetchedAt: { type: string, format: date-time }
+
+    MessageCapState:
+      type: object
+      required: [accountId, cappingStatus, fetchedAt]
+      properties:
+        accountId: { type: string }
+        totalQuota: { type: integer }
+        usedQuota: { type: integer }
+        remaining: { type: integer }
+        cycleStart: { type: string, format: date-time }
+        cycleEnd: { type: string, format: date-time }
+        cappingStatus:
+          type: string
+          enum: [NONE, FIRST_WARNING, SECOND_WARNING, CAPPED]
+        oteStatus:
+          type: string
+          enum: [NOT_ELIGIBLE, ELIGIBLE, ACTIVE_IN_CURRENT_CYCLE, EXHAUSTED]
+        mvStatus:
+          type: string
+          enum: [NOT_ELIGIBLE, NOT_ACTIVE, ACTIVE, ACTIVE_UPGRADE_AVAILABLE]
+        fetchedAt: { type: string, format: date-time }
+
+    UsabilityState:
+      type: object
+      required: [accountId, state, evidence]
+      properties:
+        accountId: { type: string }
+        state:
+          type: string
+          enum: [ONLINE, STALE, OFFLINE, NEED_REAUTH, PROXY_FAILED, RATE_LIMITED]
+        canSendText: { type: boolean }
+        canSendNewChat: { type: boolean }
+        canCreateGroup: { type: boolean }
+        canAddToGroup: { type: boolean }
+        canSendMedia: { type: boolean }
+        canFollowChannel: { type: boolean }
+        blockedReason:
+          type: string
+          nullable: true
+          enum:
+            - null
+            - REACHOUT_TIMELOCK
+            - NEW_CHAT_CAPPED
+            - RATE_LIMITED
+            - OFFLINE
+            - NEED_REAUTH
+        blockedUntil: { type: string, format: date-time, nullable: true }
+        restriction: { $ref: '#/components/schemas/RestrictionState' }
+        messageCap: { $ref: '#/components/schemas/MessageCapState' }
+        evidence: { $ref: '#/components/schemas/Evidence' }
+
+    # ──── 群 ────
+    GroupParticipant:
+      type: object
+      properties:
+        jid: { type: string }
+        admin:
+          type: string
+          nullable: true
+          enum: [null, admin, superadmin]
+        isLid: { type: boolean }
+
+    GroupMetadata:
+      type: object
+      properties:
+        id: { type: string }
+        subject: { type: string }
+        desc: { type: string, nullable: true }
+        owner: { type: string }
+        creation: { type: integer, description: unix timestamp }
+        participants:
+          type: array
+          items: { $ref: '#/components/schemas/GroupParticipant' }
+        size: { type: integer }
+        announce: { type: boolean }
+        restrict: { type: boolean }
+
+    GroupParticipantResults:
+      type: object
+      properties:
+        groupJid: { type: string }
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              jid: { type: string }
+              status:
+                type: string
+                description: "200=OK, 403=隐私阻止, 408=超时, 409=已在群, 419=群满, 500=服务端错误"
+                example: "200"
+
+    # ──── 群组操作请求 body ────
+    ParticipantsActionBody:
+      type: object
+      required: [accountId, participants]
+      properties:
+        accountId: { type: string }
+        participants:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: string
+            example: "918094787585"
+
+    GroupSubjectBody:
+      type: object
+      required: [accountId, subject]
+      properties:
+        accountId: { type: string }
+        subject:
+          type: string
+          maxLength: 100
+
+    GroupDescriptionBody:
+      type: object
+      required: [accountId]
+      properties:
+        accountId: { type: string }
+        description:
+          type: string
+          maxLength: 512
+          nullable: true
+          description: 传 null 表示清空描述
+
+    GroupPictureBody:
+      type: object
+      required: [accountId, image]
+      properties:
+        accountId: { type: string }
+        image:
+          $ref: '#/components/schemas/MediaInput'
+
+    GroupAnnouncementBody:
+      type: object
+      required: [accountId, mode]
+      properties:
+        accountId: { type: string }
+        mode:
+          type: string
+          enum: [announcement, not_announcement]
+          description: announcement=仅管理员发言；not_announcement=允许成员发言
+
+    GroupLockedBody:
+      type: object
+      required: [accountId, mode]
+      properties:
+        accountId: { type: string }
+        mode:
+          type: string
+          enum: [locked, unlocked]
+          description: locked=仅管理员可改群信息
+
+    GroupMemberAddModeBody:
+      type: object
+      required: [accountId, mode]
+      properties:
+        accountId: { type: string }
+        mode:
+          type: string
+          enum: [admin_add, all_member_add]
+
+    GroupJoinApprovalBody:
+      type: object
+      required: [accountId, mode]
+      properties:
+        accountId: { type: string }
+        mode:
+          type: string
+          enum: [on, off]
+
+    GroupJoinBody:
+      type: object
+      required: [accountId, inviteCode]
+      properties:
+        accountId: { type: string }
+        inviteCode:
+          type: string
+          description: 邀请 code（不含 https://chat.whatsapp.com/ 前缀）
+          example: "ABCdef123456"
+
+    GroupInviteCodeResult:
+      type: object
+      properties:
+        groupJid: { type: string }
+        inviteCode: { type: string }
+        inviteUrl:
+          type: string
+          example: "https://chat.whatsapp.com/ABCdef123456"
+
+    GroupListItem:
+      type: object
+      properties:
+        groupJid: { type: string }
+        subject: { type: string }
+        size: { type: integer }
+        owner: { type: string }
+        isAdmin: { type: boolean }
+        announce: { type: boolean }
+        creation: { type: integer }
+
+    PendingParticipant:
+      type: object
+      properties:
+        jid: { type: string }
+        requestedAt: { type: integer, description: unix timestamp }
+
+    GroupOperationResult:
+      type: object
+      properties:
+        success: { type: boolean }
+        groupJid: { type: string, nullable: true }
+        warnings:
+          type: array
+          items: { type: string }
+
+    # ──── 消息通用 ────
+    MediaInput:
+      type: object
+      description: 媒体输入。三种方式三选一。
+      properties:
+        url:
+          type: string
+          format: uri
+          description: HTTPS URL，协议层服务器自己下载
+        base64:
+          type: string
+          description: base64 编码的二进制（不带 data:image 前缀）
+        path:
+          type: string
+          description: 协议层本地路径（仅运维场景，业务侧请勿用）
+        mimetype:
+          type: string
+          example: "image/jpeg"
+
+    MessageKey:
+      type: object
+      required: [remoteJid, fromMe, id]
+      properties:
+        remoteJid:
+          type: string
+          example: "8617600627277@s.whatsapp.net"
+        fromMe: { type: boolean }
+        id:
+          type: string
+          example: "3EB0A5B6C7D8E9F0"
+        participant:
+          type: string
+          nullable: true
+          description: 群消息时为发送者 jid
+
+    ContextInfo:
+      type: object
+      properties:
+        quotedMessage:
+          $ref: '#/components/schemas/MessageKey'
+        mentionedJid:
+          type: array
+          items: { type: string }
+        forwardingScore:
+          type: integer
+          description: 转发次数计数
+
+    MessageSendResult:
+      type: object
+      required: [messageId, key]
+      properties:
+        messageId: { type: string }
+        key: { $ref: '#/components/schemas/MessageKey' }
+        timestamp: { type: integer, description: unix timestamp }
+        status:
+          type: string
+          enum: [pending, server_ack, delivery_ack, read, played]
+          description: 发送时通常返回 pending 或 server_ack；后续状态走 message.ack 事件
+        recipients:
+          type: array
+          description: 群消息每个收件人的 ack（可选）
+          items:
+            type: object
+            properties:
+              jid: { type: string }
+              status: { type: string }
+
+    # ──── 消息发送 body ────
+    TextMessageBody:
+      type: object
+      required: [accountId, jid, text]
+      properties:
+        accountId: { type: string }
+        jid:
+          type: string
+          example: "8617600627277@s.whatsapp.net"
+        text:
+          type: string
+          maxLength: 4096
+        contextInfo:
+          $ref: '#/components/schemas/ContextInfo'
+        ephemeralExpirationSec:
+          type: integer
+          description: 阅后即焚 TTL；省略则跟群/会话设置
+
+    ImageMessageBody:
+      type: object
+      required: [accountId, jid, image]
+      properties:
+        accountId: { type: string }
+        jid: { type: string }
+        image: { $ref: '#/components/schemas/MediaInput' }
+        caption:
+          type: string
+          maxLength: 1024
+        viewOnce: { type: boolean, default: false }
+        contextInfo: { $ref: '#/components/schemas/ContextInfo' }
+
+    AudioMessageBody:
+      type: object
+      required: [accountId, jid, audio]
+      properties:
+        accountId: { type: string }
+        jid: { type: string }
+        audio: { $ref: '#/components/schemas/MediaInput' }
+        ptt:
+          type: boolean
+          default: false
+          description: true=语音消息（push-to-talk），false=普通音频文件
+        mimetype:
+          type: string
+          example: "audio/ogg; codecs=opus"
+
+    VideoMessageBody:
+      type: object
+      required: [accountId, jid, video]
+      properties:
+        accountId: { type: string }
+        jid: { type: string }
+        video: { $ref: '#/components/schemas/MediaInput' }
+        caption: { type: string, maxLength: 1024 }
+        gifPlayback:
+          type: boolean
+          default: false
+          description: true=作为 GIF 循环播放
+        viewOnce: { type: boolean, default: false }
+
+    DocumentMessageBody:
+      type: object
+      required: [accountId, jid, document, fileName]
+      properties:
+        accountId: { type: string }
+        jid: { type: string }
+        document: { $ref: '#/components/schemas/MediaInput' }
+        fileName: { type: string, maxLength: 256 }
+        mimetype: { type: string, example: "application/pdf" }
+        caption: { type: string, maxLength: 1024 }
+
+    LocationMessageBody:
+      type: object
+      required: [accountId, jid, degreesLatitude, degreesLongitude]
+      properties:
+        accountId: { type: string }
+        jid: { type: string }
+        degreesLatitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+        degreesLongitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+        name: { type: string }
+        address: { type: string }
+
+    ContactCardMessageBody:
+      type: object
+      required: [accountId, jid, contacts]
+      properties:
+        accountId: { type: string }
+        jid: { type: string }
+        contacts:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            type: object
+            required: [displayName, vcard]
+            properties:
+              displayName: { type: string }
+              vcard:
+                type: string
+                description: 标准 VCARD 3.0 字符串
+
+    LinkMessageBody:
+      type: object
+      required: [accountId, jid, text]
+      properties:
+        accountId: { type: string }
+        jid: { type: string }
+        text:
+          type: string
+          description: 含 URL 的文本，协议层自动抓取预览
+        generatePreview:
+          type: boolean
+          default: true
+          description: false=只发文本不抓预览，省流量
+
+    ReactionMessageBody:
+      type: object
+      required: [accountId, jid, targetKey, reaction]
+      properties:
+        accountId: { type: string }
+        jid: { type: string }
+        targetKey:
+          $ref: '#/components/schemas/MessageKey'
+        reaction:
+          type: string
+          description: 单个 emoji 字符；传空字符串 '' 表示移除 reaction
+          example: "👍"
+
+    DeleteMessageBody:
+      type: object
+      required: [accountId, jid, targetKey]
+      properties:
+        accountId: { type: string }
+        jid: { type: string }
+        targetKey:
+          $ref: '#/components/schemas/MessageKey'
+        forEveryone:
+          type: boolean
+          default: true
+          description: true=撤回所有人；false=仅本地删除
+
+    ForwardMessageBody:
+      type: object
+      required: [accountId, jid, sourceMessage]
+      properties:
+        accountId: { type: string }
+        jid:
+          type: string
+          description: 目标会话
+        sourceMessage:
+          type: object
+          description: 要转发的原始消息（可以是 message.received 事件 payload）
+          additionalProperties: true
+        forceForward:
+          type: boolean
+          default: false
+          description: true=标记为"已转发"（Baileys 默认 false 不打转发标记）
+
+    ReadMessagesBody:
+      type: object
+      required: [accountId, keys]
+      properties:
+        accountId: { type: string }
+        keys:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/MessageKey' }
+
+    TypingPresenceBody:
+      type: object
+      required: [accountId, jid, state]
+      properties:
+        accountId: { type: string }
+        jid: { type: string }
+        state:
+          type: string
+          enum: [composing, recording, paused, available, unavailable]
+        durationSec:
+          type: integer
+          default: 5
+          description: 自动恢复 paused 的延迟；0 表示一直保持
+
+    DownloadMediaBody:
+      type: object
+      required: [accountId, message]
+      properties:
+        accountId: { type: string }
+        message:
+          type: object
+          description: |
+            完整 WA message 对象（含 key + message body）。
+            业务侧从 `message.received` 事件 payload 直接取出来传过来。
+            协议层用 Baileys downloadMediaMessage 解密 + fetch 媒体。
+            **不要只传 key**：媒体 URL / mediaKey 等元数据在 message body 里，缺了无法解密。
+          additionalProperties: true
+        returnAs:
+          type: string
+          enum: [base64, url, stream]
+          default: base64
+          description: |
+            base64: 直接返回二进制（小文件，<5MB）
+            url: 兼容字段；协议层默认不上传对象存储，未配置存储时返回 501
+            stream: HTTP chunked 流（仅 HTTP 协议层支持）
+
+    DownloadMediaResult:
+      type: object
+      properties:
+        mimetype: { type: string }
+        sizeBytes: { type: integer }
+        base64: { type: string, nullable: true }
+        url:
+          type: string
+          format: uri
+          nullable: true
+          description: 兼容字段；协议层默认不上传对象存储，通常为 null
+
+    StatusBroadcastBody:
+      type: object
+      required: [accountId, content, statusJidList]
+      properties:
+        accountId: { type: string }
+        content:
+          type: object
+          description: 内容支持文本/图片/视频，结构同对应消息类型
+          oneOf:
+            - $ref: '#/components/schemas/TextMessageBody'
+            - $ref: '#/components/schemas/ImageMessageBody'
+            - $ref: '#/components/schemas/VideoMessageBody'
+        statusJidList:
+          type: array
+          description: 可见的联系人 jid 列表（status@broadcast 限定可见范围）
+          items: { type: string }
+
+    # ──── Business catalog / product ────
+    BusinessProfileUpdateBody:
+      type: object
+      required: [accountId]
+      properties:
+        accountId: { type: string }
+        description: { type: string, maxLength: 256, nullable: true }
+        category: { type: string, nullable: true }
+        email: { type: string, format: email, nullable: true }
+        website:
+          type: array
+          maxItems: 2
+          items: { type: string, format: uri }
+        address: { type: string, nullable: true }
+        businessHours:
+          type: object
+          nullable: true
+          properties:
+            timezone: { type: string, example: "Asia/Shanghai" }
+            config:
+              type: array
+              items:
+                type: object
+                properties:
+                  day_of_week:
+                    type: string
+                    enum: [mon, tue, wed, thu, fri, sat, sun]
+                  mode:
+                    type: string
+                    enum: [open_24h, closed, specific_hours]
+                  open_time:
+                    type: integer
+                    description: 分钟数（0-1439）
+                  close_time:
+                    type: integer
+
+    Product:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        priceAmount1000:
+          type: integer
+          description: 价格 × 1000（避免浮点），例如 USD 9.99 = 9990
+        currency: { type: string, example: "USD" }
+        retailerId: { type: string, nullable: true }
+        url: { type: string, format: uri, nullable: true }
+        images:
+          type: array
+          items:
+            type: object
+            properties:
+              url: { type: string }
+              mimetype: { type: string }
+        isHidden: { type: boolean, default: false }
+        availability:
+          type: string
+          enum: [in_stock, out_of_stock]
+
+    CatalogResult:
+      type: object
+      properties:
+        accountId: { type: string }
+        targetJid: { type: string }
+        total: { type: integer }
+        products:
+          type: array
+          items: { $ref: '#/components/schemas/Product' }
+        nextCursor: { type: string, nullable: true }
+
+    ProductMutationBody:
+      type: object
+      required: [accountId, action]
+      properties:
+        accountId: { type: string }
+        action:
+          type: string
+          enum: [create, update, delete]
+        product:
+          $ref: '#/components/schemas/Product'
+          description: "create / update 时必填；delete 时只需 productIds"
+        productIds:
+          type: array
+          items: { type: string }
+          description: "delete 时使用"
+
+    ProductMutationResult:
+      type: object
+      properties:
+        action: { type: string }
+        success: { type: boolean }
+        product:
+          $ref: '#/components/schemas/Product'
+        deletedIds:
+          type: array
+          items: { type: string }
+
+    # ──── 频道 newsletter ────
+    ChannelOpBody:
+      type: object
+      required: [accountId, jid]
+      properties:
+        accountId: { type: string }
+        jid:
+          type: string
+          example: "120363xxx@newsletter"
+
+    ChannelReactionBody:
+      type: object
+      required: [accountId, serverId, reaction]
+      properties:
+        accountId: { type: string }
+        serverId:
+          type: string
+          description: 频道消息的 serverId（newsletter 消息独有，不是普通 messageId）
+        reaction:
+          type: string
+          description: 单个 emoji；传空字符串 '' 表示移除
+
+    ChannelMessage:
+      type: object
+      properties:
+        serverId: { type: string }
+        timestamp: { type: integer }
+        senderJid: { type: string }
+        type:
+          type: string
+          enum: [text, image, video, document, audio]
+        content: { type: string, nullable: true }
+        mediaUrl: { type: string, format: uri, nullable: true }
+        reactions:
+          type: array
+          items:
+            type: object
+            properties:
+              emoji: { type: string }
+              count: { type: integer }
+
+    ChannelMessageList:
+      type: object
+      properties:
+        jid: { type: string }
+        total: { type: integer }
+        messages:
+          type: array
+          items: { $ref: '#/components/schemas/ChannelMessage' }
+        nextCursor: { type: string, nullable: true }
+
+
+# ──────────────────── webhooks（事件订阅，NATS subject: unsea.v1.events.*） ────────────────────
+webhooks:
+  account.state_changed:
+    post:
+      summary: 账号状态变迁
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [account.state_changed] }
+                version: { type: string, example: v1 }
+                accountId: { type: string }
+                from: { type: string }
+                to: { type: string }
+                evidence: { $ref: '#/components/schemas/Evidence' }
+                semantic:
+                  type: string
+                  enum: [PROXY_FAILED, RATE_LIMITED, NEED_REAUTH, RECONNECTING]
+                occurredAt: { type: string, format: date-time }
+                workerId: { type: string }
+      responses:
+        '200':
+          description: ack
+
+  account.heartbeat:
+    post:
+      summary: 稳态心跳（30s/次）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [account.heartbeat] }
+                accountId: { type: string }
+                state: { type: string }
+                evidence: { $ref: '#/components/schemas/Evidence' }
+                reportedAt: { type: string, format: date-time }
+
+  account.need_reauth:
+    post:
+      summary: 账号需要重新 pairing
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [account.need_reauth] }
+                accountId: { type: string }
+                reason: { type: string }
+                ownerWorkerId: { type: string }
+                ownerEndpoint: { type: string, nullable: true }
+                lastSeenAt: { type: string, format: date-time }
+
+  account.owner_assigned:
+    post:
+      summary: 账号首次分配 owner worker
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [account.owner_assigned] }
+                accountId: { type: string }
+                ownerWorkerId: { type: string }
+                ownerEndpoint: { type: string, nullable: true }
+                currentWorkerId: { type: string }
+                reason: { type: string, enum: [pairing_code, qr, import, online] }
+                assignedAt: { type: string, format: date-time }
+
+  account.owner_changed:
+    post:
+      summary: 账号 owner worker 变更
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [account.owner_changed] }
+                accountId: { type: string }
+                previousOwnerWorkerId: { type: string, nullable: true }
+                ownerWorkerId: { type: string }
+                ownerEndpoint: { type: string, nullable: true }
+                reason: { type: string, enum: [failover, reassign] }
+                changedAt: { type: string, format: date-time }
+
+  account.owner_unassigned:
+    post:
+      summary: 账号 owner 绑定解除
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [account.owner_unassigned] }
+                accountId: { type: string }
+                previousOwnerWorkerId: { type: string, nullable: true }
+                previousOwnerEndpoint: { type: string, nullable: true }
+                currentWorkerId: { type: string, nullable: true }
+                releaseSlot: { type: boolean, nullable: true }
+                reason: { type: string, enum: [admin_unassign, failover_no_live_worker, failover_no_capacity] }
+                unassignedAt: { type: string, format: date-time }
+
+  account.restricted:
+    post:
+      summary: 风控状态变化（reachoutTimelock）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [account.restricted] }
+                accountId: { type: string }
+                isActive: { type: boolean }
+                restrictedUntil: { type: string, format: date-time }
+                enforcementType: { type: string }
+
+  account.new_chat_capping:
+    post:
+      summary: 拉群配额变化
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [account.new_chat_capping] }
+                accountId: { type: string }
+                cappingStatus: { type: string }
+                remaining: { type: integer }
+                cycleEnd: { type: string, format: date-time }
+
+  account.proxy_rotated:
+    post:
+      summary: IP 实际变化
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [account.proxy_rotated] }
+                accountId: { type: string }
+                newIp: { type: string }
+                country: { type: string }
+                asn: { type: string }
+
+  pairing.code_generated:
+    post:
+      summary: pairing code 已生成
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [pairing.code_generated] }
+                accountId: { type: string }
+                code: { type: string }
+                expiresAt: { type: string, format: date-time }
+
+  qr.code_generated:
+    post:
+      summary: QR 二维码已生成
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [qr.code_generated] }
+                accountId: { type: string }
+                qrBase64: { type: string }
+                expiresAt: { type: string, format: date-time }
+
+  account.online_changed:
+    post:
+      summary: ONLINE ↔ 非 ONLINE 翻转
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [account.online_changed] }
+                accountId: { type: string }
+                online: { type: boolean }
+                transitionedAt: { type: string, format: date-time }
+                reason: { type: string, nullable: true }
+
+  account.stale_detected:
+    post:
+      summary: STALE 兜底触发（半开 ws，已强制重连）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [account.stale_detected] }
+                accountId: { type: string }
+                lastDateRecv: { type: string, format: date-time }
+                ageMs: { type: integer }
+                detectedAt: { type: string, format: date-time }
+
+  account.type_detected:
+    post:
+      summary: 账号类型识别（首次 pairing 或强制刷新）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [account.type_detected] }
+                accountId: { type: string }
+                detection: { $ref: '#/components/schemas/BusinessDetection' }
+
+  account.proxy_failed:
+    post:
+      summary: 代理连续失败（业务侧应触发 rebind）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [account.proxy_failed] }
+                accountId: { type: string }
+                proxySessionId: { type: string }
+                failureCount: { type: integer }
+                reason: { type: string }
+                lastFailedAt: { type: string, format: date-time }
+
+  account.rate_limited:
+    post:
+      summary: 收到 WA 服务端限流信号
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [account.rate_limited] }
+                accountId: { type: string }
+                retryAfterMs: { type: integer, nullable: true }
+                raw: { type: object, additionalProperties: true }
+
+  pairing.completed:
+    post:
+      summary: pairing 流程成功，账号已绑定
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [pairing.completed] }
+                accountId: { type: string }
+                phone: { type: string }
+                jid: { type: string }
+                detection: { $ref: '#/components/schemas/BusinessDetection' }
+                ownerWorkerId: { type: string }
+                ownerEndpoint: { type: string, nullable: true }
+                completedAt: { type: string, format: date-time }
+
+  pairing.failed:
+    post:
+      summary: pairing 流程失败（code 过期 / 用户超时未确认）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [pairing.failed] }
+                accountId: { type: string }
+                reason:
+                  type: string
+                  enum: [code_expired, user_timeout, code_invalid, server_rejected, network_error]
+                failedAt: { type: string, format: date-time }
+
+  message.received:
+    post:
+      summary: 收到 WA 消息（业务侧主要消费入口）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [message.received] }
+                accountId: { type: string }
+                key: { $ref: '#/components/schemas/MessageKey' }
+                fromJid: { type: string }
+                pushName: { type: string, nullable: true }
+                isGroup: { type: boolean }
+                messageType:
+                  type: string
+                  enum: [text, image, video, audio, document, location, contact, sticker, reaction, system]
+                content:
+                  type: object
+                  additionalProperties: true
+                  description: 按 messageType 不同结构不同，业务侧按需解析
+                hasMedia: { type: boolean }
+                receivedAt: { type: string, format: date-time }
+
+  message.ack:
+    post:
+      summary: 消息 ack 状态变更（已送达 / 已读 / 撤回）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [message.ack] }
+                accountId: { type: string }
+                key: { $ref: '#/components/schemas/MessageKey' }
+                status:
+                  type: string
+                  enum: [server_ack, delivery_ack, read, played, error, revoked]
+                fromJid:
+                  type: string
+                  description: 群消息时为 ack 来源（哪个成员已读）
+                ackedAt: { type: string, format: date-time }
+
+  group.participant_changed:
+    post:
+      summary: 群成员变更（被动事件，自己或他人）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [group.participant_changed] }
+                accountId: { type: string }
+                groupJid: { type: string }
+                action:
+                  type: string
+                  enum: [add, remove, promote, demote]
+                participants:
+                  type: array
+                  items: { type: string }
+                operator:
+                  type: string
+                  description: 谁做的这次操作
+                occurredAt: { type: string, format: date-time }
+
+  group.metadata_updated:
+    post:
+      summary: 群信息变更（subject/desc/picture/settings）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event: { type: string, enum: [group.metadata_updated] }
+                accountId: { type: string }
+                groupJid: { type: string }
+                changes:
+                  type: object
+                  properties:
+                    subject: { type: string, nullable: true }
+                    description: { type: string, nullable: true }
+                    pictureUpdated: { type: boolean }
+                    announce: { type: boolean, nullable: true }
+                    restrict: { type: boolean, nullable: true }
+                    memberAddMode: { type: string, nullable: true }
+                operator: { type: string }
+                occurredAt: { type: string, format: date-time }

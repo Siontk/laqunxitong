@@ -1,0 +1,86 @@
+{
+  "title": "Unsea Protocol Layer",
+  "uid": "unsea-protocol",
+  "tags": ["unsea", "whatsapp", "baileys"],
+  "timezone": "browser",
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Online accounts (cluster)",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "targets": [{ "expr": "sum(unsea_accounts_by_state{state=\"ONLINE\"})" }]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "NEED_REAUTH (24h)",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "targets": [{ "expr": "sum(increase(unsea_disconnect_total{semantic=\"NEED_REAUTH\"}[24h]))" }]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Accounts by state",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "targets": [{ "expr": "sum by (state) (unsea_accounts_by_state)", "legendFormat": "{{state}}" }]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Reconnect rate by type",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 6 },
+      "targets": [{ "expr": "sum by (type) (rate(unsea_reconnect_total[1m]))", "legendFormat": "type {{type}}" }]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Event loop lag (worker)",
+      "gridPos": { "x": 12, "y": 6, "w": 12, "h": 6 },
+      "targets": [{ "expr": "unsea_event_loop_lag_seconds", "legendFormat": "{{worker}}" }]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "STALE detected",
+      "gridPos": { "x": 0, "y": 12, "w": 8, "h": 6 },
+      "targets": [{ "expr": "sum(rate(unsea_stale_detected_total[5m]))" }]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "WA error codes",
+      "gridPos": { "x": 8, "y": 12, "w": 8, "h": 6 },
+      "targets": [{ "expr": "sum by (code) (rate(unsea_wa_error_total[5m]))", "legendFormat": "{{code}}" }]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Restriction / capping",
+      "gridPos": { "x": 16, "y": 12, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "sum(unsea_restriction_active)", "legendFormat": "restriction active" },
+        { "expr": "sum(unsea_message_capping_status{status=\"CAPPED\"})", "legendFormat": "new-chat CAPPED" }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Event publish",
+      "gridPos": { "x": 0, "y": 18, "w": 12, "h": 6 },
+      "targets": [
+        { "expr": "sum by (event) (rate(unsea_events_published_total[1m]))", "legendFormat": "ok {{event}}" },
+        { "expr": "sum(rate(unsea_events_publish_errors_total[1m]))", "legendFormat": "errors" }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "HTTP latency P95",
+      "gridPos": { "x": 12, "y": 18, "w": 12, "h": 6 },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (route, le) (rate(unsea_http_request_duration_seconds_bucket[5m])))", "legendFormat": "{{route}}" }]
+    }
+  ]
+}

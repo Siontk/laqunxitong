@@ -1,0 +1,15 @@
+{
+  "name": "companion-device-without-advsig",
+  "description": "分身设备 (wsDeviceId=20) 缺 deviceIdentityKey，必须 NEED_REAUTH",
+  "input": {
+    "wid": "8617600627277",
+    "clientStaticPrivateKey": "4GaIfq6ECs+36w3FX0bQkb3Y72cAcwffxAigzR9JdGs=",
+    "clientStaticPublicKey": "BXzBPQzW75d5aCQiCNVIUfGBtyjX1tC5Aw5gRqusHkAG",
+    "identityPrivateKey": "GPgg+QckPXr82DEP9b1KbBOlIh0nk1LzoliD3ZV5YEs=",
+    "identityPublicKey": "jBC0ERw9dh8jp4v34tAspVqm5p42tiY6RJoMI9FR2gE=",
+    "wsDeviceId": 20,
+    "vip": false
+  },
+  "expectedResult": "NEED_REAUTH",
+  "expectedMissing": ["deviceIdentityKey"]
+}
