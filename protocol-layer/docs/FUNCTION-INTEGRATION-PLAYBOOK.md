@@ -1,5 +1,7 @@
 # 功能层联调手册
 
+> 测试环境部署、Redis/Kafka 安装和功能层联调拓扑见 [`TEST-ENV-DEPLOYMENT-INTEGRATION.md`](TEST-ENV-DEPLOYMENT-INTEGRATION.md)。
+
 本文给功能层联调用，覆盖 HTTP 调用、Kafka 消费、owner 缓存、账号状态和异常处置。
 
 ## 1. 联调目标

@@ -1,5 +1,7 @@
 # 部署手册（DEPLOYMENT）
 
+> 三台服务器测试环境和功能层联调方案见 [`TEST-ENV-DEPLOYMENT-INTEGRATION.md`](TEST-ENV-DEPLOYMENT-INTEGRATION.md)。
+
 ## 环境前置
 
 | 依赖 | 版本 | 用途 |
