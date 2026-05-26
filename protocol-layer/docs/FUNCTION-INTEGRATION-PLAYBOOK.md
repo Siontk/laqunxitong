@@ -75,6 +75,7 @@ Kafka message key 固定为 `accountId`。功能层必须按 key 分区消费，
 
 ```json
 {
+  "eventId": "acc_001:account.owner_changed:m4abc123:k9x7p2la",
   "event": "account.owner_changed",
   "version": "v1",
   "accountId": "acc_001",
@@ -96,10 +97,12 @@ Kafka message key 固定为 `accountId`。功能层必须按 key 分区消费，
 
 功能层处理规则：
 
-- 用 `accountId + event + occurredAt` 做幂等。
+- 优先用 `eventId` 做幂等；如果旧事件没有 `eventId`，再用 `accountId + event + occurredAt` 兜底。
 - 同账号按 `occurredAt` 或业务侧递增版本做乱序保护。
 - 消费失败不要丢，进入功能层自己的 DLQ。
 - owner 事件优先级最高，影响后续 HTTP 直连地址。
+
+协议层 Kafka producer 禁止自动创建 topic。联调前必须先创建 5 个业务 topic；发布失败会写入协议层本地文件 DLQ：`EVENT_DLQ_DIR/YYYY-MM-DD.jsonl`。
 
 ### 3.3 Owner Cache 消费逻辑
 
@@ -280,6 +283,8 @@ POST /v1/accounts/import/baileys-json
 POST /v1/accounts/{accountId}/online
 ```
 
+`online` 的 body 里 `proxy` 可选，但账号必须已经有绑定 proxy；如果没有绑定 proxy，协议层会返回 `PROXY_REQUIRED`。
+
 ## 6. 发送消息
 
 ### 6.1 文本消息
@@ -417,6 +422,8 @@ POST /v1/admin/unassign
   "releaseSlot": true
 }
 ```
+
+`/v1/admin/unassign` 只解除 Registry owner 绑定并释放 load，不会自动 logout，也不会主动清理 creds。
 
 ### 8.3 手动离线
 

@@ -9,7 +9,7 @@
 | Node.js | ≥ 20 LTS | 协议层运行时 |
 | Redis | ≥ 7 | L2 keys + Registry + 令牌桶 |
 | Kafka / AWS MSK | Kafka 3.x | 事件总线（按 accountId 分区、可重放） |
-| PostgreSQL | ≥ 16 | L3 creds 持久化（可选，建议生产开启） |
+| MySQL | ≥ 8.0 | L3 creds 持久化（可选，建议生产开启） |
 | Prometheus + Grafana | latest | 可观测性 |
 
 ## 本地开发
@@ -17,7 +17,7 @@
 ```bash
 # 启动依赖
 cd protocol-layer
-docker compose -f deploy/docker-compose.yml up -d redis kafka postgres prometheus grafana
+docker compose -f deploy/docker-compose.yml up -d redis kafka mysql prometheus grafana
 
 # 安装 + 启动 standalone（master+worker 同进程）
 npm install
@@ -84,7 +84,7 @@ metadata: { name: protocol-secrets }
 stringData:
   redis_url: "redis://redis-master.redis.svc:6379"
   kafka_brokers: "b-1.protocol-msk.kafka.ap-southeast-1.amazonaws.com:9094,b-2.protocol-msk.kafka.ap-southeast-1.amazonaws.com:9094"
-  pg_url: "postgres://unsea:***@postgres.db.svc:5432/unsea"
+  mysql_url: "mysql://unsea:***@mysql.db.svc:3306/unsea"
 ```
 
 ### 应用
@@ -123,7 +123,8 @@ Worker 受 SIGTERM 时优雅退出（注销 Registry + 关 ws），Registry mast
 | `KAFKA_SSL` | false | MSK TLS listener 设为 true |
 | `KAFKA_USERNAME` / `KAFKA_PASSWORD` | 空 | MSK SASL/SCRAM 时配置 |
 | `KAFKA_SASL_MECHANISM` | scram-sha-512 | plain / scram-sha-256 / scram-sha-512 |
-| `PG_ENABLED` | false | 是否启用 L3 |
+| `MYSQL_ENABLED` | false | 是否启用 L3 MySQL creds 持久化 |
+| `MYSQL_CONNECTION_URI` | mysql://unsea:unsea@localhost:3306/unsea | MySQL 连接串 |
 | `MAX_ACCOUNTS_PER_WORKER` | 400 | 单 worker 承载上限；4C8G 单机测试设为 500，4 worker 合计 2000 |
 | `MAX_OLD_SPACE_MB` | 1280 | V8 堆上限 |
 

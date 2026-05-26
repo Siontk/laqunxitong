@@ -13,7 +13,7 @@ import type { Metrics } from '../observability/metrics.js'
 import type { Logger } from '../observability/logger.js'
 import { MemoryStoreAdapter } from './adapters/memory.js'
 import type { RedisStoreAdapter } from './adapters/redis.js'
-import type { PostgresStoreAdapter } from './adapters/postgres.js'
+import type { StoreAdapter } from './adapters/types.js'
 
 /** Baileys creds 结构（来自 openapi BaileysAuthState.creds） */
 export type CredsRecord = Record<string, unknown>
@@ -21,7 +21,7 @@ export type CredsRecord = Record<string, unknown>
 export interface CredsStoreDeps {
   l1?: MemoryStoreAdapter<CredsRecord>
   l2?: RedisStoreAdapter<CredsRecord>
-  l3?: PostgresStoreAdapter<CredsRecord>
+  l3?: StoreAdapter<CredsRecord>
   metrics: Metrics
   logger: Logger
 }
@@ -29,7 +29,7 @@ export interface CredsStoreDeps {
 export class CredsStore {
   private l1: MemoryStoreAdapter<CredsRecord>
   private l2?: RedisStoreAdapter<CredsRecord>
-  private l3?: PostgresStoreAdapter<CredsRecord>
+  private l3?: StoreAdapter<CredsRecord>
   private metrics: Metrics
   private logger: Logger
   private hits = 0

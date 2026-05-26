@@ -81,10 +81,10 @@ spec:
             - name: KAFKA_BROKERS
               valueFrom:
                 secretKeyRef: { name: protocol-secrets, key: kafka_brokers }
-            - name: PG_CONNECTION_STRING
+            - name: MYSQL_CONNECTION_URI
               valueFrom:
-                secretKeyRef: { name: protocol-secrets, key: pg_url }
-            - name: PG_ENABLED
+                secretKeyRef: { name: protocol-secrets, key: mysql_url }
+            - name: MYSQL_ENABLED
               value: "true"
           envFrom:
             - configMapRef: { name: protocol-layer-config }
@@ -154,9 +154,11 @@ spec:
             - name: KAFKA_BROKERS
               valueFrom:
                 secretKeyRef: { name: protocol-secrets, key: kafka_brokers }
-            - name: PG_CONNECTION_STRING
+            - name: MYSQL_CONNECTION_URI
               valueFrom:
-                secretKeyRef: { name: protocol-secrets, key: pg_url }
+                secretKeyRef: { name: protocol-secrets, key: mysql_url }
+            - name: MYSQL_ENABLED
+              value: "true"
           envFrom:
             - configMapRef: { name: protocol-layer-config }
           ports:

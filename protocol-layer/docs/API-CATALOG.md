@@ -8,7 +8,7 @@
 
 ```
 下发任务前  ──> GET /v1/accounts/{id}/usability       看 canCreateGroup / canSendNewChat / blockedReason
-找正确 worker ──> GET /v1/accounts/resolve/{id}        拿 ownerEndpoint，缓存 30-60s
+找正确 worker ──> GET /v1/accounts/resolve/{accountId} 拿 ownerEndpoint，缓存 30-60s
 订阅事件   ──> Kafka topics protocol.*.events.v1    key=accountId，消费账号/消息/群/owner 事件
 ```
 
@@ -116,7 +116,7 @@ POST /v1/accounts/import/batch
 ## 2. 账号生命周期
 
 ```http
-POST /v1/accounts/{id}/online   { proxy?: {...} }    # 用已存 creds 上线（autoOnline 漏的补做）
+POST /v1/accounts/{id}/online   { proxy?: {...} }    # 用已存 creds 上线；body proxy 可选，但必须已绑定 proxy
 POST /v1/accounts/{id}/offline                       # 主动下线（保留 creds）
 POST /v1/accounts/{id}/logout                        # 远端踢设备 + 删 creds
 ```
@@ -134,7 +134,7 @@ POST /v1/accounts/{id}/logout                        # 远端踢设备 + 删 cre
 | `GET /v1/accounts/{id}/type` | 判 Business | accountType / isBusiness / isVerified / bizName / source |
 | `POST /v1/accounts/{id}/probe` | 关键操作前 | rttMs（3s 不 ack 返 503） |
 | `POST /v1/accounts/check-whatsapp` | 批量手机号查 WA 用户 | results[] |
-| `GET /v1/accounts/resolve/{id}` | 解析 owner worker | ownerWorkerId / ownerEndpoint |
+| `GET /v1/accounts/resolve/{accountId}` | 解析 owner worker | ownerWorkerId / ownerEndpoint |
 
 ### 状态机 13 态
 
@@ -227,7 +227,7 @@ POST /v1/groups/create
 ```http
 POST /v1/groups/{groupJid}/participants/add
 { "accountId": "acc_001", "participants": ["918..."] }
-→ [{ jid, status, content }]
+→ { groupJid, results: [{ jid, status, content }] }
 ```
 
 **per-participant status 码**：
@@ -265,8 +265,8 @@ POST /v1/groups/join                      → { groupJid, joined }
 
 ```http
 GET  /v1/groups/{jid}/pending             → { pending: [{ jid, requestedAt }] }
-POST /v1/groups/{jid}/pending/approve     → [{ jid, status }]
-POST /v1/groups/{jid}/pending/reject      → [{ jid, status }]
+POST /v1/groups/{jid}/pending/approve     → { groupJid, results: [{ jid, status }] }
+POST /v1/groups/{jid}/pending/reject      → { groupJid, results: [{ jid, status }] }
 ```
 
 ### 6.5 查询
@@ -293,9 +293,9 @@ POST /v1/groups/{jid}/leave                → 退群
 | 文档 | `POST /v1/messages/document` | document, fileName, mimetype, caption? |
 | 位置 | `POST /v1/messages/location` | degreesLatitude, degreesLongitude, name?, address? |
 | 名片 | `POST /v1/messages/contact-card` | contacts: [{displayName, vcard}] |
-| 链接 | `POST /v1/messages/link` | text, generatePreview? |
+| 链接 | `POST /v1/messages/link` | text, generatePreview?（保留字段，预览由 WA/Baileys 处理） |
 | 表情反应 | `POST /v1/messages/reaction` | targetKey, reaction（空串=移除）|
-| 撤回 | `POST /v1/messages/delete` | targetKey, forEveryone? |
+| 撤回 | `POST /v1/messages/delete` | targetKey, forEveryone?（保留字段） |
 | 转发 | `POST /v1/messages/forward` | sourceMessage（完整 message 对象）|
 | 动态 | `POST /v1/messages/status` | content (text/image/video), statusJidList[] |
 | 已读 | `POST /v1/messages/read` | keys: [MessageKey] |

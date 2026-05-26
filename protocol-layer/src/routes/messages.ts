@@ -9,7 +9,6 @@ import type { RouteRegistrar } from './_context.js'
 const MediaInputShape = z.object({
   url: z.string().optional(),
   base64: z.string().optional(),
-  path: z.string().optional(),
   mimetype: z.string().optional()
 })
 

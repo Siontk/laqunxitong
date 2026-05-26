@@ -17,6 +17,7 @@ import type { Logger } from '../observability/logger.js'
 import { type EventType, topicKindFor } from './subjects.js'
 
 export interface EventEnvelope<TData = Record<string, unknown>> {
+  eventId: string
   event: EventType
   version: string
   accountId: string
@@ -69,6 +70,12 @@ export async function createEventPublisher(
     if (kind === 'group') return config.kafka.topicGroup
     if (kind === 'pairing') return config.kafka.topicPairing
     return config.kafka.topicAccount
+  }
+
+  function createEventId(accountId: string, evt: EventType): string {
+    const ts = Date.now().toString(36)
+    const rand = Math.random().toString(36).slice(2, 10)
+    return `${accountId}:${evt}:${ts}:${rand}`
   }
 
   async function connectKafka(): Promise<void> {
@@ -128,6 +135,7 @@ export async function createEventPublisher(
           key: envelope.accountId,
           value: JSON.stringify(envelope),
           headers: {
+            eventId: envelope.eventId,
             event: envelope.event,
             version: envelope.version,
             workerId: envelope.workerId,
@@ -145,6 +153,7 @@ export async function createEventPublisher(
     evidence?: Record<string, unknown>
   ): Promise<void> {
     const envelope: EventEnvelope = {
+      eventId: createEventId(accountId, evt),
       event: evt,
       version: 'v1',
       accountId,

@@ -154,7 +154,7 @@ info:
     ## 业务侧使用三件套
 
     1. **下发任务前**：调 `GET /v1/accounts/{id}/usability`，看 `canCreateGroup` / `canAddToGroup` 是否 true
-    2. **找正确的 worker**：调 `GET /v1/accounts/resolve/{id}` 拿 `ownerEndpoint`，业务侧缓存 30-60s
+    2. **找正确的 worker**：调 `GET /v1/accounts/resolve/{accountId}` 拿 `ownerEndpoint`，业务侧缓存 30-60s
     3. **订阅事件**：Kafka topics `protocol.*.events.v1`，message key 为 accountId，业务侧消费事件类型
 
     ## 错误码
@@ -2849,7 +2849,7 @@ components:
     # ──── 消息通用 ────
     MediaInput:
       type: object
-      description: 媒体输入。三种方式三选一。
+      description: 媒体输入。当前协议层支持 URL 或 base64；生产建议功能层传对象存储 URL。
       properties:
         url:
           type: string
@@ -2858,9 +2858,6 @@ components:
         base64:
           type: string
           description: base64 编码的二进制（不带 data:image 前缀）
-        path:
-          type: string
-          description: 协议层本地路径（仅运维场景，业务侧请勿用）
         mimetype:
           type: string
           example: "image/jpeg"
@@ -3034,7 +3031,7 @@ components:
         generatePreview:
           type: boolean
           default: true
-          description: false=只发文本不抓预览，省流量
+          description: 当前保留字段；实际预览由 WhatsApp/Baileys 根据 text 中 URL 处理
 
     ReactionMessageBody:
       type: object
@@ -3060,7 +3057,7 @@ components:
         forEveryone:
           type: boolean
           default: true
-          description: true=撤回所有人；false=仅本地删除
+          description: 当前保留字段；协议层目前按 Baileys delete key 执行
 
     ForwardMessageBody:
       type: object
@@ -3315,6 +3312,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [account.state_changed] }
                 version: { type: string, example: v1 }
                 accountId: { type: string }
@@ -3339,6 +3337,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [account.heartbeat] }
                 accountId: { type: string }
                 state: { type: string }
@@ -3354,6 +3353,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [account.need_reauth] }
                 accountId: { type: string }
                 reason: { type: string }
@@ -3370,6 +3370,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [account.owner_assigned] }
                 accountId: { type: string }
                 ownerWorkerId: { type: string }
@@ -3387,6 +3388,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [account.owner_changed] }
                 accountId: { type: string }
                 previousOwnerWorkerId: { type: string, nullable: true }
@@ -3404,6 +3406,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [account.owner_unassigned] }
                 accountId: { type: string }
                 previousOwnerWorkerId: { type: string, nullable: true }
@@ -3422,6 +3425,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [account.restricted] }
                 accountId: { type: string }
                 isActive: { type: boolean }
@@ -3437,6 +3441,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [account.new_chat_capping] }
                 accountId: { type: string }
                 cappingStatus: { type: string }
@@ -3452,6 +3457,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [account.proxy_rotated] }
                 accountId: { type: string }
                 newIp: { type: string }
@@ -3467,6 +3473,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [pairing.code_generated] }
                 accountId: { type: string }
                 code: { type: string }
@@ -3481,6 +3488,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [qr.code_generated] }
                 accountId: { type: string }
                 qrBase64: { type: string }
@@ -3495,6 +3503,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [account.online_changed] }
                 accountId: { type: string }
                 online: { type: boolean }
@@ -3510,6 +3519,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [account.stale_detected] }
                 accountId: { type: string }
                 lastDateRecv: { type: string, format: date-time }
@@ -3525,6 +3535,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [account.type_detected] }
                 accountId: { type: string }
                 detection: { $ref: '#/components/schemas/BusinessDetection' }
@@ -3538,6 +3549,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [account.proxy_failed] }
                 accountId: { type: string }
                 proxySessionId: { type: string }
@@ -3554,6 +3566,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [account.rate_limited] }
                 accountId: { type: string }
                 retryAfterMs: { type: integer, nullable: true }
@@ -3568,6 +3581,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [pairing.completed] }
                 accountId: { type: string }
                 phone: { type: string }
@@ -3586,6 +3600,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [pairing.failed] }
                 accountId: { type: string }
                 reason:
@@ -3602,6 +3617,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [message.received] }
                 accountId: { type: string }
                 key: { $ref: '#/components/schemas/MessageKey' }
@@ -3627,6 +3643,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [message.ack] }
                 accountId: { type: string }
                 key: { $ref: '#/components/schemas/MessageKey' }
@@ -3647,6 +3664,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [group.participant_changed] }
                 accountId: { type: string }
                 groupJid: { type: string }
@@ -3670,6 +3688,7 @@ webhooks:
             schema:
               type: object
               properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
                 event: { type: string, enum: [group.metadata_updated] }
                 accountId: { type: string }
                 groupJid: { type: string }

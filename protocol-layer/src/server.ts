@@ -19,7 +19,8 @@ import { registerErrorHandler } from './error/error-handler.js'
 import { createEventPublisher, type EventPublisher } from './events/publisher.js'
 import { createRedis, RedisStoreAdapter } from './store/adapters/redis.js'
 import { MemoryStoreAdapter } from './store/adapters/memory.js'
-import { PostgresStoreAdapter, createPostgresPool } from './store/adapters/postgres.js'
+import { MySqlStoreAdapter, createMySqlPool } from './store/adapters/mysql.js'
+import type { StoreAdapter } from './store/adapters/types.js'
 import { CredsStore } from './store/creds-store.js'
 import { KeysStore } from './store/keys-store.js'
 import { ProxyStore } from './store/proxy-store.js'
@@ -61,12 +62,13 @@ async function main(): Promise<void> {
   const credsL2 = new RedisStoreAdapter<Record<string, unknown>>(redis, config.redis.keyPrefix)
   const keysL2 = new RedisStoreAdapter<Record<string, unknown>>(redis, config.redis.keyPrefix)
   // L3
-  let credsL3: PostgresStoreAdapter<Record<string, unknown>> | undefined
-  if (config.postgres.enabled) {
-    const pgPool = createPostgresPool(config.postgres.connectionString)
-    credsL3 = new PostgresStoreAdapter<Record<string, unknown>>(pgPool, 'creds_store')
-    await credsL3.ensureSchema()
-    logger.info('postgres L3 connected')
+  let credsL3: StoreAdapter<Record<string, unknown>> | undefined
+  if (config.mysql.enabled) {
+    const mysqlPool = createMySqlPool(config.mysql.connectionUri)
+    const mysqlStore = new MySqlStoreAdapter<Record<string, unknown>>(mysqlPool, 'creds_store')
+    await mysqlStore.ensureSchema()
+    credsL3 = mysqlStore
+    logger.info('mysql L3 connected')
   }
 
   const credsStore = new CredsStore({ l1: credsL1, l2: credsL2, l3: credsL3, metrics, logger })
@@ -247,7 +249,7 @@ async function main(): Promise<void> {
       }
       await app.close()
       await publisher.close()
-      if (credsL3) await credsL3.close().catch(() => {})
+      if (credsL3?.close) await credsL3.close().catch(() => {})
       if ('quit' in redis) await (redis as { quit: () => Promise<unknown> }).quit().catch(() => {})
     } catch (err) {
       logger.error({ err }, 'shutdown error')

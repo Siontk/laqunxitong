@@ -4,7 +4,7 @@
  * 设计原则：
  *   - L1 内存（LRU）— 进程内热数据
  *   - L2 Redis — 跨进程共享、TTL 兜底、Worker 漂移时拉取
- *   - L3 Postgres — 长期持久化 + 跨 region 复制
+ *   - L3 MySQL — 长期持久化 + 跨 region 复制
  *
  * 所有适配器实现同一接口，CredsStore/KeysStore 按需组合。
  */

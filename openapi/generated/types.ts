@@ -1773,6 +1773,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "account.state_changed";
                         /** @example v1 */
@@ -1825,6 +1827,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "account.heartbeat";
                         accountId?: string;
@@ -1863,6 +1867,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "account.need_reauth";
                         accountId?: string;
@@ -1902,6 +1908,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "account.owner_assigned";
                         accountId?: string;
@@ -1943,6 +1951,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "account.owner_changed";
                         accountId?: string;
@@ -1984,6 +1994,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "account.owner_unassigned";
                         accountId?: string;
@@ -2026,6 +2038,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "account.restricted";
                         accountId?: string;
@@ -2064,6 +2078,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "account.new_chat_capping";
                         accountId?: string;
@@ -2102,6 +2118,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "account.proxy_rotated";
                         accountId?: string;
@@ -2139,6 +2157,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "pairing.code_generated";
                         accountId?: string;
@@ -2176,6 +2196,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "qr.code_generated";
                         accountId?: string;
@@ -2213,6 +2235,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "account.online_changed";
                         accountId?: string;
@@ -2251,6 +2275,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "account.stale_detected";
                         accountId?: string;
@@ -2290,6 +2316,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "account.type_detected";
                         accountId?: string;
@@ -2325,6 +2353,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "account.proxy_failed";
                         accountId?: string;
@@ -2364,6 +2394,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "account.rate_limited";
                         accountId?: string;
@@ -2402,6 +2434,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "pairing.completed";
                         accountId?: string;
@@ -2443,6 +2477,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "pairing.failed";
                         accountId?: string;
@@ -2481,6 +2517,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "message.received";
                         accountId?: string;
@@ -2528,6 +2566,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "message.ack";
                         accountId?: string;
@@ -2569,6 +2609,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "group.participant_changed";
                         accountId?: string;
@@ -2611,6 +2653,8 @@ export interface webhooks {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
                         /** @enum {string} */
                         event?: "group.metadata_updated";
                         accountId?: string;
@@ -3182,7 +3226,7 @@ export interface components {
             groupJid?: string | null;
             warnings?: string[];
         };
-        /** @description 媒体输入。三种方式三选一。 */
+        /** @description 媒体输入。当前协议层支持 URL 或 base64；生产建议功能层传对象存储 URL。 */
         MediaInput: {
             /**
              * Format: uri
@@ -3191,8 +3235,6 @@ export interface components {
             url?: string;
             /** @description base64 编码的二进制（不带 data:image 前缀） */
             base64?: string;
-            /** @description 协议层本地路径（仅运维场景，业务侧请勿用） */
-            path?: string;
             /** @example image/jpeg */
             mimetype?: string;
         };
@@ -3304,7 +3346,7 @@ export interface components {
             /** @description 含 URL 的文本，协议层自动抓取预览 */
             text: string;
             /**
-             * @description false=只发文本不抓预览，省流量
+             * @description 当前保留字段；实际预览由 WhatsApp/Baileys 根据 text 中 URL 处理
              * @default true
              */
             generatePreview: boolean;
@@ -3324,7 +3366,7 @@ export interface components {
             jid: string;
             targetKey: components["schemas"]["MessageKey"];
             /**
-             * @description true=撤回所有人；false=仅本地删除
+             * @description 当前保留字段；协议层目前按 Baileys delete key 执行
              * @default true
              */
             forEveryone: boolean;

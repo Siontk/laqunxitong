@@ -38,7 +38,7 @@
 依赖：
   - Redis 单实例（< 4GB）
   - Kafka / AWS MSK
-  - PostgreSQL（启用 L3）
+  - MySQL（启用 L3）
 ```
 
 ## 12 小时长跑步骤

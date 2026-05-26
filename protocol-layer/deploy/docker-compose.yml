@@ -14,6 +14,7 @@ services:
     container_name: unsea-kafka
     ports:
       - "9092:9092"
+      - "9093:9093"
     volumes:
       - kafka-data:/bitnami/kafka
     environment:
@@ -25,18 +26,19 @@ services:
       KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
       KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
       KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
-      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "false"
 
-  postgres:
-    image: postgres:16-alpine
-    container_name: unsea-postgres
+  mysql:
+    image: mysql:8.4
+    container_name: unsea-mysql
     environment:
-      POSTGRES_USER: unsea
-      POSTGRES_PASSWORD: unsea
-      POSTGRES_DB: unsea
-    ports: ["5432:5432"]
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_USER: unsea
+      MYSQL_PASSWORD: unsea
+      MYSQL_DATABASE: unsea
+    ports: ["3306:3306"]
     volumes:
-      - pg-data:/var/lib/postgresql/data
+      - mysql-data:/var/lib/mysql
 
   prometheus:
     image: prom/prometheus:latest
@@ -74,11 +76,11 @@ services:
       REDIS_URL: redis://redis:6379
       EVENT_BACKEND: kafka
       KAFKA_BROKERS: kafka:9092
-      PG_ENABLED: "true"
-      PG_CONNECTION_STRING: postgres://unsea:unsea@postgres:5432/unsea
+      MYSQL_ENABLED: "true"
+      MYSQL_CONNECTION_URI: mysql://unsea:unsea@mysql:3306/unsea
       LOG_PRETTY: "true"
       LOG_LEVEL: info
-    depends_on: [redis, kafka, postgres]
+    depends_on: [redis, kafka, mysql]
     ports: ["8080:8080"]
 
   protocol-worker-1:
@@ -95,11 +97,11 @@ services:
       REDIS_URL: redis://redis:6379
       EVENT_BACKEND: kafka
       KAFKA_BROKERS: kafka:9092
-      PG_ENABLED: "true"
-      PG_CONNECTION_STRING: postgres://unsea:unsea@postgres:5432/unsea
+      MYSQL_ENABLED: "true"
+      MYSQL_CONNECTION_URI: mysql://unsea:unsea@mysql:3306/unsea
       MAX_ACCOUNTS_PER_WORKER: "500"
       LOG_PRETTY: "true"
-    depends_on: [redis, kafka, postgres, protocol-master]
+    depends_on: [redis, kafka, mysql, protocol-master]
     ports: ["8081:8081"]
 
   protocol-worker-2:
@@ -116,11 +118,11 @@ services:
       REDIS_URL: redis://redis:6379
       EVENT_BACKEND: kafka
       KAFKA_BROKERS: kafka:9092
-      PG_ENABLED: "true"
-      PG_CONNECTION_STRING: postgres://unsea:unsea@postgres:5432/unsea
+      MYSQL_ENABLED: "true"
+      MYSQL_CONNECTION_URI: mysql://unsea:unsea@mysql:3306/unsea
       MAX_ACCOUNTS_PER_WORKER: "500"
       LOG_PRETTY: "true"
-    depends_on: [redis, kafka, postgres, protocol-master]
+    depends_on: [redis, kafka, mysql, protocol-master]
     ports: ["8082:8082"]
 
   protocol-worker-3:
@@ -137,11 +139,11 @@ services:
       REDIS_URL: redis://redis:6379
       EVENT_BACKEND: kafka
       KAFKA_BROKERS: kafka:9092
-      PG_ENABLED: "true"
-      PG_CONNECTION_STRING: postgres://unsea:unsea@postgres:5432/unsea
+      MYSQL_ENABLED: "true"
+      MYSQL_CONNECTION_URI: mysql://unsea:unsea@mysql:3306/unsea
       MAX_ACCOUNTS_PER_WORKER: "500"
       LOG_PRETTY: "true"
-    depends_on: [redis, kafka, postgres, protocol-master]
+    depends_on: [redis, kafka, mysql, protocol-master]
     ports: ["8083:8083"]
 
   protocol-worker-4:
@@ -158,16 +160,16 @@ services:
       REDIS_URL: redis://redis:6379
       EVENT_BACKEND: kafka
       KAFKA_BROKERS: kafka:9092
-      PG_ENABLED: "true"
-      PG_CONNECTION_STRING: postgres://unsea:unsea@postgres:5432/unsea
+      MYSQL_ENABLED: "true"
+      MYSQL_CONNECTION_URI: mysql://unsea:unsea@mysql:3306/unsea
       MAX_ACCOUNTS_PER_WORKER: "500"
       LOG_PRETTY: "true"
-    depends_on: [redis, kafka, postgres, protocol-master]
+    depends_on: [redis, kafka, mysql, protocol-master]
     ports: ["8084:8084"]
 
 volumes:
   redis-data:
   kafka-data:
-  pg-data:
+  mysql-data:
   prom-data:
   grafana-data:

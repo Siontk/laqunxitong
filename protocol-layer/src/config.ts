@@ -58,10 +58,10 @@ const ConfigSchema = z.object({
     keyPrefix: z.string().default('unsea:')
   }),
 
-  // ── Postgres（L3 creds 持久化）──
-  postgres: z.object({
+  // ── MySQL（L3 creds 持久化）──
+  mysql: z.object({
     enabled: z.coerce.boolean().default(false),
-    connectionString: z.string().default('postgres://unsea:unsea@localhost:5432/unsea')
+    connectionUri: z.string().default('mysql://unsea:unsea@localhost:3306/unsea')
   }),
 
   // ── Worker 容量 ──
@@ -156,9 +156,9 @@ export function loadConfig(): Config {
       db: process.env.REDIS_DB,
       keyPrefix: process.env.REDIS_KEY_PREFIX
     },
-    postgres: {
-      enabled: process.env.PG_ENABLED,
-      connectionString: process.env.PG_CONNECTION_STRING
+    mysql: {
+      enabled: process.env.MYSQL_ENABLED,
+      connectionUri: process.env.MYSQL_CONNECTION_URI
     },
     worker: {
       maxAccountsPerWorker: process.env.MAX_ACCOUNTS_PER_WORKER,

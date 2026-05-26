@@ -52,6 +52,8 @@ Redis 和 Kafka 不要开放公网。
 
 Kafka 集群模式还需要 Kafka broker 之间互通 `9092` 和 `9093`。`9093` 是 KRaft controller 通信端口，不给功能层和协议层使用。
 
+如果要验证账号重启恢复和长期 creds 持久化，建议再加一台 MySQL 或使用 AWS RDS MySQL；三台最小联调环境也可以先 `MYSQL_ENABLED=false`，此时 L3 冷持久化不参与测试。
+
 ## 3. Redis 部署
 
 在 `redis-server` 安装 Docker：
@@ -78,7 +80,7 @@ services:
       - --requirepass
       - "REPLACE_WITH_STRONG_PASSWORD"
       - --maxmemory
-      - "6gb"
+      - "2gb"
       - --maxmemory-policy
       - "noeviction"
     ports:
@@ -107,7 +109,7 @@ sudo docker exec -it protocol-redis redis-cli -a 'REPLACE_WITH_STRONG_PASSWORD' 
 PONG
 ```
 
-协议层配置：
+2C4G Redis 先设 `2gb`；2C8G Redis 可以改成 `5gb` 或 `6gb`。协议层配置：
 
 ```env
 REDIS_URL=redis://:REPLACE_WITH_STRONG_PASSWORD@redis-server-private-ip:6379
@@ -195,6 +197,8 @@ KAFKA_TOPIC_MESSAGE=protocol.message.events.v1
 KAFKA_TOPIC_GROUP=protocol.group.events.v1
 KAFKA_TOPIC_PAIRING=protocol.pairing.events.v1
 ```
+
+协议层 producer 禁止自动建 topic；5 个 topic 必须提前创建且名字必须和环境变量完全一致。发布失败会写本地文件 DLQ：`EVENT_DLQ_DIR/YYYY-MM-DD.jsonl`，生产需要给这个目录挂持久盘并做磁盘告警。
 
 功能层 Kafka 配置：
 
@@ -315,7 +319,9 @@ KAFKA_TOPIC_MESSAGE=protocol.message.events.v1
 KAFKA_TOPIC_GROUP=protocol.group.events.v1
 KAFKA_TOPIC_PAIRING=protocol.pairing.events.v1
 
-PG_ENABLED=false
+MYSQL_ENABLED=false
+# 如果启用 L3:
+# MYSQL_CONNECTION_URI=mysql://unsea:password@mysql-server-private-ip:3306/unsea
 
 MAX_ACCOUNTS_PER_WORKER=200
 MAX_OLD_SPACE_MB=1536
@@ -356,7 +362,7 @@ After=network.target
 [Service]
 WorkingDirectory=/home/ubuntu/laqunxitong/protocol-layer
 EnvironmentFile=/home/ubuntu/protocol.env
-ExecStart=/usr/bin/npm run start
+ExecStart=/usr/bin/node --enable-source-maps --max-old-space-size=1536 dist/protocol-layer/src/server.js
 Restart=always
 RestartSec=5
 LimitNOFILE=1048576
@@ -425,6 +431,7 @@ content-type: application/json
 
 ```json
 {
+  "eventId": "acc_001:account.owner_assigned:m4abc123:k9x7p2la",
   "event": "account.owner_assigned",
   "version": "v1",
   "accountId": "acc_001",
@@ -442,7 +449,7 @@ content-type: application/json
 消费规则：
 
 - consumer group 使用功能层自己的名字，例如 `function-layer-staging`。
-- 用 `accountId + event + occurredAt` 做幂等。
+- 优先用 `eventId` 做幂等；如果旧事件没有 `eventId`，再用 `accountId + event + occurredAt` 兜底。
 - owner 事件先处理，避免后续 HTTP 打错 worker。
 - 消费失败进入功能层自己的 DLQ，不要无限阻塞主消费。
 - 功能层不要依赖 Kafka offset 作为业务唯一 ID。
@@ -487,6 +494,12 @@ curl -X POST http://protocol-server-private-ip:8080/v1/auth/pairing-code \
   -d '{
     "phone": "8613800000000",
     "customPairingCode": "12345678",
+    "proxy": {
+      "protocol": "socks5",
+      "url": "socks5://user:pass@proxy-host:1080",
+      "sessionId": "acc_8613800000000",
+      "country": "US"
+    },
     "browserDisplay": {
       "browserName": "Opera",
       "platform": "ios",
@@ -549,7 +562,10 @@ curl -X POST http://owner-endpoint/v1/groups/120xxx@g.us/participants/add \
 
 - `accountId -> ownerWorkerId`
 - worker heartbeat / load
+- Baileys creds
 - Baileys keys
+- runtime state
+- device profile / browser display
 - reconnect token bucket
 - proxy binding
 
@@ -577,7 +593,7 @@ biz:account-state:{accountId}  -> ONLINE / OFFLINE / NEED_REAUTH / PROXY_FAILED
 2. `protocol-server /readyz` 返回 200。
 3. 协议层日志里 Kafka producer 启动成功。
 4. 功能层能消费 5 个 Kafka topic。
-5. 调 Pairing Code 后功能层收到 `pairing.code_generated`。
+5. 调 Pairing Code 后功能层收到 `pairing.code_generated`；如果调 QR 登录，则收到 `qr.code_generated`。
 6. 授权成功后功能层收到 `account.owner_assigned` 和 `account.state_changed`。
 7. 功能层 owner cache 能写入 `accountId -> ownerEndpoint`。
 8. 功能层用 ownerEndpoint 调发消息接口成功。
@@ -604,6 +620,6 @@ COLD_START_BATCH_SIZE=20
 1. Redis 换 ElastiCache Redis Cluster。
 2. Kafka 换 AWS MSK 三 broker 起步。
 3. 协议层拆 master / worker，多台横向扩展。
-4. 增加 RDS PostgreSQL 做长期 creds 持久化。
+4. 增加 RDS MySQL 做长期 creds 持久化。
 5. 增加 Prometheus / Grafana / CloudWatch 告警。
 6. owner、account state、message event 按 accountId 分区扩容。

@@ -1,8 +1,9 @@
 FROM node:20-bookworm-slim AS builder
 
 WORKDIR /app
-COPY protocol-layer/package.json protocol-layer/tsconfig.json ./
+COPY protocol-layer/package.json protocol-layer/package-lock.json protocol-layer/tsconfig.json ./
 COPY openapi /opt/openapi
+COPY openapi/generated ../openapi/generated
 # 拷源码
 COPY protocol-layer/src ./src
 
@@ -19,6 +20,7 @@ COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /opt/openapi /opt/openapi
+COPY --from=builder /openapi/generated /openapi/generated
 COPY protocol-layer/deploy/entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 
@@ -28,7 +30,7 @@ ENV OPENAPI_SPEC_PATH=/opt/openapi/protocol-v1.yaml
 
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
-  CMD curl -f http://localhost:8080/healthz || exit 1
+  CMD sh -c 'curl -f "http://localhost:${HTTP_PORT:-8080}/healthz"' || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["./entrypoint.sh"]
