@@ -245,6 +245,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{accountId}/reconnect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 主动重连账号
+         * @description 功能层在换 IP、任务恢复、STALE/异常状态需要恢复时调用。协议层只做账号级原子能力：
+         *     校验 owner、检查账号是否可重连、走 Redis reconnect 限流，然后重建 socket。
+         *
+         *     如果账号处于 `NEED_REAUTH` / `LOGGED_OUT` / `DEVICE_REMOVED`，返回 422 `NEED_REAUTH`，
+         *     功能层应重新 pairing 或彻底放弃并调用 `/v1/admin/unassign`。
+         *
+         *     如果重连风暴保护命中，返回 429 `RECONNECT_LIMITED`，`details.retryAfterMs` 和
+         *     `details.cooldownUntil` 告诉功能层多久后再试。协议层不会排队。
+         */
+        post: operations["reconnectAccount"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{accountId}/logout": {
         parameters: {
             query?: never;
@@ -554,7 +581,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 创建群 */
+        /**
+         * 创建群
+         * @description 受 Redis 账号级 group-op lock 和 worker group-op token bucket 保护。
+         *     命中保护时直接返回 429 `ACCOUNT_BUSY` 或 `WORKER_BUSY`，协议层不排队。
+         */
         post: operations["groupCreate"];
         delete?: never;
         options?: never;
@@ -590,6 +621,16 @@ export interface paths {
          *
          *     单条结果的 `results[].status` 取值见 `ErrorCode` 枚举；`rawStatus` 为 WA 原始数字码（200/403/408/409/419/500）。
          *     端点级 4xx/5xx 仅在请求非法或协议层自身故障时返回，业务失败（隐私阻止/群满/已在群等）均在 200 + ErrorCode 内表达。
+         *
+         *     ### 忙碌保护
+         *
+         *     群写操作受 Redis 账号级 lock + worker token bucket 保护。命中时协议层直接返回：
+         *
+         *     - 429 `ACCOUNT_BUSY`：该账号已有群写操作进行中或 partial 后后台 WA 操作仍可能在跑。
+         *     - 429 `WORKER_BUSY`：当前 worker 群写操作令牌耗尽。
+         *
+         *     错误详情含 `retryAfterMs`、`cooldownUntil`、`reason`，同时 Kafka 会发
+         *     `account.group_busy` / `account.worker_busy` 事件。
          */
         post: operations["groupParticipantAdd"];
         delete?: never;
@@ -2675,6 +2716,186 @@ export interface webhooks {
         patch?: never;
         trace?: never;
     };
+    "account.reconnect_requested": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 功能层请求账号重连已被接受 */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
+                        /** @enum {string} */
+                        event?: "account.reconnect_requested";
+                        accountId?: string;
+                        fromState?: string;
+                        /** @example RECONNECTING */
+                        state?: string;
+                        /** @enum {string} */
+                        reason?: "proxy_changed" | "manual" | "stale" | "task_recover";
+                        force?: boolean;
+                        proxySessionId?: string;
+                        proxyCountry?: string;
+                        alreadyInFlight?: boolean;
+                        workerId?: string;
+                        /** Format: date-time */
+                        requestedAt?: string;
+                    };
+                };
+            };
+            responses: never;
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "account.reconnect_limited": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 重连风暴保护命中 */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
+                        /** @enum {string} */
+                        event?: "account.reconnect_limited";
+                        accountId?: string;
+                        state?: string;
+                        retryAfterMs?: number;
+                        /** Format: date-time */
+                        cooldownUntil?: string;
+                        /** @enum {string} */
+                        reason?: "account_reconnect_cooldown" | "global_reconnect_limited" | "worker_reconnect_limited" | "reconnect_limited";
+                        requestedReason?: string;
+                        force?: boolean;
+                        workerId?: string;
+                        /** Format: date-time */
+                        occurredAt?: string;
+                    };
+                };
+            };
+            responses: never;
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "account.group_busy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 单账号群写操作忙碌 */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
+                        /** @enum {string} */
+                        event?: "account.group_busy";
+                        accountId?: string;
+                        operation?: string;
+                        retryAfterMs?: number;
+                        /** Format: date-time */
+                        cooldownUntil?: string;
+                        /** @example account_group_operation_in_progress */
+                        reason?: string;
+                    };
+                };
+            };
+            responses: never;
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "account.worker_busy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** worker 群写操作令牌耗尽 */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
+                        /** @enum {string} */
+                        event?: "account.worker_busy";
+                        accountId?: string;
+                        operation?: string;
+                        workerId?: string;
+                        retryAfterMs?: number;
+                        /** Format: date-time */
+                        cooldownUntil?: string;
+                        /** @example worker_group_operation_limited */
+                        reason?: string;
+                    };
+                };
+            };
+            responses: never;
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "pairing.completed": {
         parameters: {
             query?: never;
@@ -2996,6 +3217,7 @@ export interface components {
             evidence?: components["schemas"]["Evidence"];
             /**
              * @description 错误详情。`NOT_OWNER` 时包含 accountId/currentWorkerId/ownerWorkerId/ownerEndpoint，
+             *     `ACCOUNT_BUSY` / `WORKER_BUSY` / `RECONNECT_LIMITED` 时包含 retryAfterMs/cooldownUntil/reason，
              *     业务层应刷新 owner 后直连 ownerEndpoint 重试一次。
              */
             details?: {
@@ -3047,7 +3269,7 @@ export interface components {
          */
         StateSource: "HEARTBEAT" | "MANUAL_REFRESH" | "TASK_REPORT" | "IMPORT" | "PAIRING" | "RECONNECT" | "UNKNOWN";
         /** @enum {string} */
-        ErrorCode: "OK" | "PRIVACY_BLOCKED" | "TIMEOUT" | "ALREADY_IN" | "GROUP_FULL" | "SERVER_ERROR" | "PROBE_TIMEOUT" | "REACHOUT_TIMELOCK" | "BANNED" | "LOGGED_OUT" | "PROXY_CHANGED" | "UNKNOWN";
+        ErrorCode: "OK" | "PRIVACY_BLOCKED" | "TIMEOUT" | "ALREADY_IN" | "GROUP_FULL" | "SERVER_ERROR" | "PROBE_TIMEOUT" | "REACHOUT_TIMELOCK" | "BANNED" | "LOGGED_OUT" | "PROXY_CHANGED" | "ACCOUNT_BUSY" | "WORKER_BUSY" | "RECONNECT_LIMITED" | "UNKNOWN";
         OnlineResult: {
             accountId: string;
             /** @example true */
@@ -3059,6 +3281,32 @@ export interface components {
              */
             syncedAt: string;
             routing: components["schemas"]["RoutingInfo"];
+        };
+        ReconnectBody: {
+            /**
+             * @description 功能层触发本次重连的原因
+             * @default manual
+             * @enum {string}
+             */
+            reason: "proxy_changed" | "manual" | "stale" | "task_recover";
+            proxy?: components["schemas"]["ProxyBinding"];
+            /**
+             * @description 预留字段。当前不绕过 Redis 限流，用于审计功能层是否强制恢复任务。
+             * @default false
+             */
+            force: boolean;
+        };
+        ReconnectResult: {
+            accountId: string;
+            /** @example true */
+            accepted: boolean;
+            /** @description true 表示账号本来已处于 RECONNECTING，本次请求只刷新了重连动作 */
+            alreadyInFlight: boolean;
+            /** @example RECONNECTING */
+            state: string;
+            retryAfterMs: number | null;
+            /** Format: date-time */
+            cooldownUntil: string | null;
         };
         ProbeResult: {
             /** @description true 表示 3 秒内收到 WA ping ack */
@@ -4365,6 +4613,49 @@ export interface operations {
             };
         };
     };
+    reconnectAccount: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @example acc_001 */
+                accountId: components["parameters"]["AccountIdPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ReconnectBody"];
+            };
+        };
+        responses: {
+            /** @description 已接受重连请求，后续状态看 `account.state_changed` */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReconnectResult"];
+                };
+            };
+            /** @description 终态账号不能重连，需要重新授权 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 重连风暴保护命中 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     logoutAccount: {
         parameters: {
             query?: never;
@@ -4823,6 +5114,13 @@ export interface operations {
                     };
                 };
             };
+            /** @description 账号或 worker 群操作繁忙，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     groupParticipantAdd: {
@@ -4852,6 +5150,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["GroupParticipantResults"];
                 };
+            };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -4939,6 +5244,13 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     groupParticipantPromote: {
@@ -4966,6 +5278,13 @@ export interface operations {
                     "application/json": components["schemas"]["GroupParticipantResults"];
                 };
             };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     groupParticipantDemote: {
@@ -4992,6 +5311,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["GroupParticipantResults"];
                 };
+            };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -5046,6 +5372,13 @@ export interface operations {
                     "application/json": components["schemas"]["GroupOperationResult"];
                 };
             };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     groupDescription: {
@@ -5072,6 +5405,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["GroupOperationResult"];
                 };
+            };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -5100,6 +5440,13 @@ export interface operations {
                     "application/json": components["schemas"]["GroupAnnouncementTextResult"];
                 };
             };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     groupPicture: {
@@ -5126,6 +5473,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["GroupOperationResult"];
                 };
+            };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -5181,6 +5535,13 @@ export interface operations {
                     "application/json": components["schemas"]["GroupInviteCodeResult"];
                 };
             };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     groupJoin: {
@@ -5217,6 +5578,13 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     groupLeave: {
@@ -5246,6 +5614,13 @@ export interface operations {
                     "application/json": components["schemas"]["GroupOperationResult"];
                 };
             };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     groupSettingAnnouncement: {
@@ -5272,6 +5647,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["GroupOperationResult"];
                 };
+            };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -5300,6 +5682,13 @@ export interface operations {
                     "application/json": components["schemas"]["GroupOperationResult"];
                 };
             };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     groupMemberAddMode: {
@@ -5327,6 +5716,13 @@ export interface operations {
                     "application/json": components["schemas"]["GroupOperationResult"];
                 };
             };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     groupJoinApproval: {
@@ -5353,6 +5749,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["GroupOperationResult"];
                 };
+            };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -5409,6 +5812,13 @@ export interface operations {
                     "application/json": components["schemas"]["GroupParticipantResults"];
                 };
             };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     groupPendingReject: {
@@ -5435,6 +5845,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["GroupParticipantResults"];
                 };
+            };
+            /** @description ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

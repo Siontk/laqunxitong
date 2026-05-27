@@ -569,7 +569,12 @@ curl -X POST http://owner-endpoint/v1/groups/120xxx@g.us/participants/add \
 - runtime state
 - device profile / browser display
 - reconnect token bucket
+- group-op account lock / worker token bucket
+- reconnect account cooldown / global bucket / worker bucket
 - proxy binding
+
+账号级 Kafka heartbeat 默认关闭，避免大规模事件量。联调时如需验证状态流，可设置
+`HEARTBEAT_EVENT_ENABLED=true`，建议 `HEARTBEAT_EVENT_INTERVAL_MS>=300000`。
 
 这些 key schema 属于协议层内部实现，后续为了百万账号会继续分片和改结构。功能层直接读取会导致强耦合，也可能读到 failover 过程中的中间状态。
 

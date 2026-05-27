@@ -390,6 +390,14 @@ POST {ownerEndpoint}/v1/messages/document
 | 退出群 | `POST /v1/groups/{groupJid}/leave` |
 | 回报群健康度 | `POST /v1/groups/health-report`，只发布 Kafka，不写业务库 |
 
+群写操作（建群、拉人、移除、升降管理员、进退群、改群资料、入群审批）受协议层 Redis 保护：
+
+- 同一个 `accountId` 同一时间只允许 1 个群写操作，命中返回 429 `ACCOUNT_BUSY`。
+- 单 worker 有 group-op token bucket，令牌耗尽返回 429 `WORKER_BUSY`。
+- 协议层不排队，功能层收到 429 后按 `details.retryAfterMs` 延迟重试。
+- 如果成员操作返回 `partial=true`，协议层会把账号级 lock 保留到 TTL，避免功能层立刻重试和后台 WA 操作重叠。
+- Kafka 会发 `account.group_busy` / `account.worker_busy`，字段含 `retryAfterMs`、`cooldownUntil`、`reason`。
+
 添加群成员示例：
 
 ```http
@@ -421,6 +429,20 @@ POST {ownerEndpoint}/v1/groups/{groupJid}/participants/add
 ```
 
 功能层判断业务结果用 `status`，不要依赖 `rawStatus`。
+
+忙碌返回示例：
+
+```json
+{
+  "code": "ACCOUNT_BUSY",
+  "message": "account acc_001 has group operation in progress",
+  "details": {
+    "accountId": "acc_001",
+    "retryAfterMs": 3000,
+    "reason": "group_operation_in_progress"
+  }
+}
+```
 
 ## 8. 状态和异常
 
@@ -469,15 +491,49 @@ POST {ownerEndpoint}/v1/accounts/{accountId}/offline
 
 手动离线释放 runtime slot，但保留 owner 绑定和 creds。
 
-### 8.4 换 IP
+### 8.4 换 IP / 异常恢复重连
 
-换 IP 不要 logout，调用：
+换 IP 不要 logout。功能层可以先更新代理绑定，再调用重连：
 
 ```http
 POST {ownerEndpoint}/v1/accounts/{accountId}/proxy/rebind
+POST {ownerEndpoint}/v1/accounts/{accountId}/reconnect
 ```
 
-协议层会关闭旧 socket 并重连到 online。
+```json
+{
+  "reason": "proxy_changed",
+  "proxy": {
+    "protocol": "socks5",
+    "url": "socks5://user:pass@proxy.example.com:1080",
+    "sessionId": "sess_001",
+    "country": "US"
+  },
+  "force": false
+}
+```
+
+`/reconnect` 会走 Redis 三层限流：
+
+- account cooldown：默认 60s，同号不能连续重连。
+- global bucket：默认整个集群 50/s。
+- worker bucket：默认单节点 10/s。
+
+成功返回 202，后续看 `account.state_changed` 到 `ONLINE`。命中限流返回 429 `RECONNECT_LIMITED`：
+
+```json
+{
+  "code": "RECONNECT_LIMITED",
+  "details": {
+    "accountId": "acc_001",
+    "retryAfterMs": 60000,
+    "cooldownUntil": "2026-05-27T10:01:00.000Z",
+    "reason": "account_reconnect_cooldown"
+  }
+}
+```
+
+Kafka 同步发 `account.reconnect_requested` 或 `account.reconnect_limited`，功能层用 `retryAfterMs/cooldownUntil/reason` 做调度。
 
 ## 9. 批量任务建议
 

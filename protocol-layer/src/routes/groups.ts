@@ -5,7 +5,7 @@
 import { z } from 'zod'
 
 import type { RouteRegistrar } from './_context.js'
-import { auditInfo, summarizeParticipantResults } from './audit-log.js'
+import { auditInfo, auditInfoSampled, summarizeParticipantResults } from './audit-log.js'
 
 const GroupJidParam = z.object({ groupJid: z.string() })
 const AccountIdParam = z.object({ accountId: z.string() })
@@ -93,13 +93,33 @@ function auditParticipantAction(
   })
 }
 
+async function runParticipantMutation(
+  ctx: Parameters<RouteRegistrar>[1],
+  accountId: string,
+  groupJid: string,
+  action: string,
+  fn: () => Promise<{ timedOut: boolean; results: Array<Record<string, unknown>> }>,
+  timeoutMs: number,
+  expectedCount: number
+): Promise<ReturnType<typeof normalizeParticipantResults>> {
+  return ctx.operationGate.runGroup(accountId, action, async () => {
+    const r = await fn()
+    const results = normalizeParticipantResults(groupJid, r.results, timeoutMs, expectedCount)
+    auditParticipantAction(ctx, action, accountId, groupJid, results)
+    return {
+      value: results,
+      holdLockUntilTtl: r.timedOut
+    }
+  })
+}
+
 export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
   // ─── 创建 / 拉人 / 移除 / 升降级 ───
   app.post('/v1/groups/create', async (req, reply) => {
     const Body = z.object({ accountId: z.string(), subject: z.string().max(100), participants: z.array(z.string()).min(1) })
     const { accountId, subject, participants } = Body.parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    try {
+    await ctx.operationGate.runGroup(accountId, 'group.create', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
       const created = await sock.groupCreate(subject, participants)
       ctx.metrics.groupCreateTotal.inc({ result: 'success' })
       const results = normalizeParticipantResults(
@@ -113,62 +133,62 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
         groupJid: created.id,
         results
       })
-    } catch (err) {
+    }).catch(err => {
       ctx.metrics.groupCreateTotal.inc({ result: 'error' })
       throw err
-    }
+    })
   })
 
   app.post('/v1/groups/:groupJid/participants/add', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    const r = await withParticipantTimeout(
-      sock.groupParticipantsUpdate(groupJid, participants, 'add') as unknown as Promise<Array<Record<string, unknown>>>,
-      timeoutMs
-    )
-    for (const p of r.results) ctx.metrics.groupAddParticipantsTotal.inc({ result: String(p.status ?? 'unknown') })
-    const results = normalizeParticipantResults(groupJid, r.results, timeoutMs, participants.length)
-    auditParticipantAction(ctx, 'group.participants.add', accountId, groupJid, results)
+    const results = await runParticipantMutation(ctx, accountId, groupJid, 'group.participants.add', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      return withParticipantTimeout(
+        sock.groupParticipantsUpdate(groupJid, participants, 'add') as unknown as Promise<Array<Record<string, unknown>>>,
+        timeoutMs
+      )
+    }, timeoutMs, participants.length)
+    for (const p of results.results) ctx.metrics.groupAddParticipantsTotal.inc({ result: String(p.status ?? 'unknown') })
     reply.send(results)
   })
 
   app.post('/v1/groups/:groupJid/participants/remove', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    const r = await withParticipantTimeout(
-      sock.groupParticipantsUpdate(groupJid, participants, 'remove') as unknown as Promise<Array<Record<string, unknown>>>,
-      timeoutMs
-    )
-    const results = normalizeParticipantResults(groupJid, r.results, timeoutMs, participants.length)
-    auditParticipantAction(ctx, 'group.participants.remove', accountId, groupJid, results)
+    const results = await runParticipantMutation(ctx, accountId, groupJid, 'group.participants.remove', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      return withParticipantTimeout(
+        sock.groupParticipantsUpdate(groupJid, participants, 'remove') as unknown as Promise<Array<Record<string, unknown>>>,
+        timeoutMs
+      )
+    }, timeoutMs, participants.length)
     reply.send(results)
   })
 
   app.post('/v1/groups/:groupJid/participants/promote', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    const r = await withParticipantTimeout(
-      sock.groupParticipantsUpdate(groupJid, participants, 'promote') as unknown as Promise<Array<Record<string, unknown>>>,
-      timeoutMs
-    )
-    const results = normalizeParticipantResults(groupJid, r.results, timeoutMs, participants.length)
-    auditParticipantAction(ctx, 'group.participants.promote', accountId, groupJid, results)
+    const results = await runParticipantMutation(ctx, accountId, groupJid, 'group.participants.promote', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      return withParticipantTimeout(
+        sock.groupParticipantsUpdate(groupJid, participants, 'promote') as unknown as Promise<Array<Record<string, unknown>>>,
+        timeoutMs
+      )
+    }, timeoutMs, participants.length)
     reply.send(results)
   })
 
   app.post('/v1/groups/:groupJid/participants/demote', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    const r = await withParticipantTimeout(
-      sock.groupParticipantsUpdate(groupJid, participants, 'demote') as unknown as Promise<Array<Record<string, unknown>>>,
-      timeoutMs
-    )
-    const results = normalizeParticipantResults(groupJid, r.results, timeoutMs, participants.length)
-    auditParticipantAction(ctx, 'group.participants.demote', accountId, groupJid, results)
+    const results = await runParticipantMutation(ctx, accountId, groupJid, 'group.participants.demote', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      return withParticipantTimeout(
+        sock.groupParticipantsUpdate(groupJid, participants, 'demote') as unknown as Promise<Array<Record<string, unknown>>>,
+        timeoutMs
+      )
+    }, timeoutMs, participants.length)
     reply.send(results)
   })
 
@@ -250,43 +270,51 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
   app.post('/v1/groups/:groupJid/subject', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, subject } = z.object({ accountId: z.string(), subject: z.string().max(100) }).parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    await sock.groupUpdateSubject(groupJid, subject)
-    auditInfo(ctx.logger, 'group.subject.update', { accountId, groupJid })
+    await ctx.operationGate.runGroup(accountId, 'group.subject.update', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      await sock.groupUpdateSubject(groupJid, subject)
+    })
+    auditInfoSampled(ctx.config, ctx.logger, 'group.subject.update', { accountId, groupJid })
     reply.send({ success: true, groupJid })
   })
 
   app.post('/v1/groups/:groupJid/description', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, description } = z.object({ accountId: z.string(), description: z.string().nullable() }).parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    await sock.groupUpdateDescription(groupJid, description ?? undefined)
-    auditInfo(ctx.logger, 'group.description.update', { accountId, groupJid, cleared: description === null })
+    await ctx.operationGate.runGroup(accountId, 'group.description.update', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      await sock.groupUpdateDescription(groupJid, description ?? undefined)
+    })
+    auditInfoSampled(ctx.config, ctx.logger, 'group.description.update', { accountId, groupJid, cleared: description === null })
     reply.send({ success: true, groupJid })
   })
 
   app.post('/v1/groups/:groupJid/announcement-text', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, text } = z.object({ accountId: z.string(), text: z.string().max(512) }).parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    await sock.groupUpdateDescription(groupJid, text)
+    await ctx.operationGate.runGroup(accountId, 'group.announcement_text.update', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      await sock.groupUpdateDescription(groupJid, text)
+    })
     await ctx.publisher.publish('group.metadata_updated', accountId, {
       groupJid,
       changes: { description: text, announcementText: text },
-      operator: sock.user?.id ?? 'self',
+      operator: accountId,
       occurredAt: new Date().toISOString()
     })
-    auditInfo(ctx.logger, 'group.announcement_text.update', { accountId, groupJid, appliedAs: 'description' })
+    auditInfoSampled(ctx.config, ctx.logger, 'group.announcement_text.update', { accountId, groupJid, appliedAs: 'description' })
     reply.send({ success: true, groupJid, text, appliedAs: 'description' })
   })
 
   app.post('/v1/groups/:groupJid/picture', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, image } = z.object({ accountId: z.string(), image: z.object({ url: z.string().optional(), base64: z.string().optional() }) }).parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    const buf = image.base64 ? Buffer.from(image.base64, 'base64') : { url: image.url! }
-    await sock.updateProfilePicture(groupJid, buf as never)
-    auditInfo(ctx.logger, 'group.picture.update', { accountId, groupJid, input: image.base64 ? 'base64' : 'url' })
+    await ctx.operationGate.runGroup(accountId, 'group.picture.update', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      const buf = image.base64 ? Buffer.from(image.base64, 'base64') : { url: image.url! }
+      await sock.updateProfilePicture(groupJid, buf as never)
+    })
+    auditInfoSampled(ctx.config, ctx.logger, 'group.picture.update', { accountId, groupJid, input: image.base64 ? 'base64' : 'url' })
     reply.send({ success: true })
   })
 
@@ -303,9 +331,11 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
   app.post('/v1/groups/:groupJid/invite/revoke', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId } = AccountIdBody.parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    const code = (await sock.groupRevokeInvite(groupJid)) ?? ''
-    auditInfo(ctx.logger, 'group.invite_code.revoke', { accountId, groupJid, inviteCodeSuffix: code.slice(-6) })
+    const code = await ctx.operationGate.runGroup(accountId, 'group.invite_code.revoke', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      return (await sock.groupRevokeInvite(groupJid)) ?? ''
+    })
+    auditInfoSampled(ctx.config, ctx.logger, 'group.invite_code.revoke', { accountId, groupJid, inviteCodeSuffix: code.slice(-6) })
     reply.send({ groupJid, inviteCode: code, inviteUrl: `https://chat.whatsapp.com/${code}` })
   })
 
@@ -315,19 +345,23 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
       inviteCode: z.string().optional(),
       inviteLink: z.string().optional()
     }).refine(v => v.inviteCode || v.inviteLink, { message: 'inviteCode or inviteLink is required' }).parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
     const code = inviteCode ?? inviteCodeFrom(inviteLink!)
-    const groupJid = await sock.groupAcceptInvite(code)
-    auditInfo(ctx.logger, 'group.join', { accountId, groupJid, inviteCodeSuffix: code.slice(-6), joined: !!groupJid })
+    const groupJid = await ctx.operationGate.runGroup(accountId, 'group.join', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      return sock.groupAcceptInvite(code)
+    })
+    auditInfoSampled(ctx.config, ctx.logger, 'group.join', { accountId, groupJid, inviteCodeSuffix: code.slice(-6), joined: !!groupJid })
     reply.send({ groupJid, joined: !!groupJid })
   })
 
   app.post('/v1/groups/:groupJid/leave', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId } = AccountIdBody.parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    await sock.groupLeave(groupJid)
-    auditInfo(ctx.logger, 'group.leave', { accountId, groupJid })
+    await ctx.operationGate.runGroup(accountId, 'group.leave', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      await sock.groupLeave(groupJid)
+    })
+    auditInfoSampled(ctx.config, ctx.logger, 'group.leave', { accountId, groupJid })
     reply.send({ success: true, groupJid })
   })
 
@@ -335,36 +369,44 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
   app.post('/v1/groups/:groupJid/settings/announcement', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, mode } = z.object({ accountId: z.string(), mode: z.enum(['announcement', 'not_announcement']) }).parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    await sock.groupSettingUpdate(groupJid, mode)
-    auditInfo(ctx.logger, 'group.settings.announcement', { accountId, groupJid, mode })
+    await ctx.operationGate.runGroup(accountId, 'group.settings.announcement', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      await sock.groupSettingUpdate(groupJid, mode)
+    })
+    auditInfoSampled(ctx.config, ctx.logger, 'group.settings.announcement', { accountId, groupJid, mode })
     reply.send({ success: true })
   })
 
   app.post('/v1/groups/:groupJid/settings/locked', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, mode } = z.object({ accountId: z.string(), mode: z.enum(['locked', 'unlocked']) }).parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    await sock.groupSettingUpdate(groupJid, mode)
-    auditInfo(ctx.logger, 'group.settings.locked', { accountId, groupJid, mode })
+    await ctx.operationGate.runGroup(accountId, 'group.settings.locked', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      await sock.groupSettingUpdate(groupJid, mode)
+    })
+    auditInfoSampled(ctx.config, ctx.logger, 'group.settings.locked', { accountId, groupJid, mode })
     reply.send({ success: true })
   })
 
   app.post('/v1/groups/:groupJid/settings/member-add-mode', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, mode } = z.object({ accountId: z.string(), mode: z.enum(['admin_add', 'all_member_add']) }).parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    await sock.groupMemberAddMode(groupJid, mode)
-    auditInfo(ctx.logger, 'group.settings.member_add_mode', { accountId, groupJid, mode })
+    await ctx.operationGate.runGroup(accountId, 'group.settings.member_add_mode', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      await sock.groupMemberAddMode(groupJid, mode)
+    })
+    auditInfoSampled(ctx.config, ctx.logger, 'group.settings.member_add_mode', { accountId, groupJid, mode })
     reply.send({ success: true })
   })
 
   app.post('/v1/groups/:groupJid/settings/join-approval', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, mode } = z.object({ accountId: z.string(), mode: z.enum(['on', 'off']) }).parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    await sock.groupJoinApprovalMode(groupJid, mode)
-    auditInfo(ctx.logger, 'group.settings.join_approval', { accountId, groupJid, mode })
+    await ctx.operationGate.runGroup(accountId, 'group.settings.join_approval', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      await sock.groupJoinApprovalMode(groupJid, mode)
+    })
+    auditInfoSampled(ctx.config, ctx.logger, 'group.settings.join_approval', { accountId, groupJid, mode })
     reply.send({ success: true })
   })
 
@@ -384,26 +426,26 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
   app.post('/v1/groups/:groupJid/pending/approve', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    const r = await withParticipantTimeout(
-      sock.groupRequestParticipantsUpdate(groupJid, participants, 'approve') as unknown as Promise<Array<Record<string, unknown>>>,
-      timeoutMs
-    )
-    const results = normalizeParticipantResults(groupJid, r.results, timeoutMs, participants.length)
-    auditParticipantAction(ctx, 'group.pending.approve', accountId, groupJid, results)
+    const results = await runParticipantMutation(ctx, accountId, groupJid, 'group.pending.approve', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      return withParticipantTimeout(
+        sock.groupRequestParticipantsUpdate(groupJid, participants, 'approve') as unknown as Promise<Array<Record<string, unknown>>>,
+        timeoutMs
+      )
+    }, timeoutMs, participants.length)
     reply.send(results)
   })
 
   app.post('/v1/groups/:groupJid/pending/reject', async (req, reply) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
-    const sock = ctx.accounts.getSocket(accountId)
-    const r = await withParticipantTimeout(
-      sock.groupRequestParticipantsUpdate(groupJid, participants, 'reject') as unknown as Promise<Array<Record<string, unknown>>>,
-      timeoutMs
-    )
-    const results = normalizeParticipantResults(groupJid, r.results, timeoutMs, participants.length)
-    auditParticipantAction(ctx, 'group.pending.reject', accountId, groupJid, results)
+    const results = await runParticipantMutation(ctx, accountId, groupJid, 'group.pending.reject', async () => {
+      const sock = ctx.accounts.getSocket(accountId)
+      return withParticipantTimeout(
+        sock.groupRequestParticipantsUpdate(groupJid, participants, 'reject') as unknown as Promise<Array<Record<string, unknown>>>,
+        timeoutMs
+      )
+    }, timeoutMs, participants.length)
     reply.send(results)
   })
 

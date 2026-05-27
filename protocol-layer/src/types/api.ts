@@ -69,6 +69,7 @@ export type {
 export type SemanticErrorCode =
   | 'PROXY_FAILED'
   | 'RATE_LIMITED'
+  | 'RECONNECT_LIMITED'
   | 'NEED_REAUTH'
   | 'RECONNECTING'
   | 'STALE'

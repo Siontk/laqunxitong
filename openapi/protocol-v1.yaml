@@ -37,6 +37,7 @@ info:
     | 业务场景 | 接口 |
     |---|---|
     | 已绑账号上线（用已存 creds） | `POST /v1/accounts/{accountId}/online` |
+    | 主动触发重连（换 IP / 异常恢复） | `POST /v1/accounts/{accountId}/reconnect` |
     | 主动下线（保留 creds，可重新 online） | `POST /v1/accounts/{accountId}/offline` |
     | 退出并移除设备 | `POST /v1/accounts/{accountId}/logout` |
 
@@ -585,6 +586,41 @@ paths:
         '200':
           description: 已下线
 
+  /v1/accounts/{accountId}/reconnect:
+    post:
+      tags: [lifecycle]
+      summary: 主动重连账号
+      description: |
+        功能层在换 IP、任务恢复、STALE/异常状态需要恢复时调用。协议层只做账号级原子能力：
+        校验 owner、检查账号是否可重连、走 Redis reconnect 限流，然后重建 socket。
+
+        如果账号处于 `NEED_REAUTH` / `LOGGED_OUT` / `DEVICE_REMOVED`，返回 422 `NEED_REAUTH`，
+        功能层应重新 pairing 或彻底放弃并调用 `/v1/admin/unassign`。
+
+        如果重连风暴保护命中，返回 429 `RECONNECT_LIMITED`，`details.retryAfterMs` 和
+        `details.cooldownUntil` 告诉功能层多久后再试。协议层不会排队。
+      operationId: reconnectAccount
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReconnectBody' }
+      responses:
+        '202':
+          description: 已接受重连请求，后续状态看 `account.state_changed`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReconnectResult' }
+        '429':
+          description: 重连风暴保护命中
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: 终态账号不能重连，需要重新授权
+
   /v1/accounts/{accountId}/logout:
     post:
       tags: [lifecycle]
@@ -902,6 +938,9 @@ paths:
     post:
       tags: [groups]
       summary: 创建群
+      description: |
+        受 Redis 账号级 group-op lock 和 worker group-op token bucket 保护。
+        命中保护时直接返回 429 `ACCOUNT_BUSY` 或 `WORKER_BUSY`，协议层不排队。
       operationId: groupCreate
       requestBody:
         required: true
@@ -928,6 +967,8 @@ paths:
                 properties:
                   groupJid: { type: string }
                   results: { $ref: '#/components/schemas/GroupParticipantResults' }
+        '429':
+          description: 账号或 worker 群操作繁忙，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/{groupJid}/participants/add:
     post:
@@ -951,6 +992,16 @@ paths:
 
         单条结果的 `results[].status` 取值见 `ErrorCode` 枚举；`rawStatus` 为 WA 原始数字码（200/403/408/409/419/500）。
         端点级 4xx/5xx 仅在请求非法或协议层自身故障时返回，业务失败（隐私阻止/群满/已在群等）均在 200 + ErrorCode 内表达。
+
+        ### 忙碌保护
+
+        群写操作受 Redis 账号级 lock + worker token bucket 保护。命中时协议层直接返回：
+
+        - 429 `ACCOUNT_BUSY`：该账号已有群写操作进行中或 partial 后后台 WA 操作仍可能在跑。
+        - 429 `WORKER_BUSY`：当前 worker 群写操作令牌耗尽。
+
+        错误详情含 `retryAfterMs`、`cooldownUntil`、`reason`，同时 Kafka 会发
+        `account.group_busy` / `account.worker_busy` 事件。
       operationId: groupParticipantAdd
       parameters:
         - $ref: '#/components/parameters/GroupJidPath'
@@ -967,6 +1018,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupParticipantResults' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/{groupJid}/metadata:
     get:
@@ -1033,6 +1086,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/{groupJid}/participants/promote:
     post:
@@ -1055,6 +1110,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupParticipantResults' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/{groupJid}/participants/demote:
     post:
@@ -1077,6 +1134,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupParticipantResults' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/accounts/{accountId}/groups:
     get:
@@ -1118,6 +1177,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupOperationResult' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/{groupJid}/description:
     post:
@@ -1138,6 +1199,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupOperationResult' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/{groupJid}/announcement-text:
     post:
@@ -1161,6 +1224,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupAnnouncementTextResult' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/{groupJid}/picture:
     post:
@@ -1181,6 +1246,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupOperationResult' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/{groupJid}/invite-code:
     get:
@@ -1224,6 +1291,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupInviteCodeResult' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/join:
     post:
@@ -1251,6 +1320,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/{groupJid}/leave:
     post:
@@ -1275,6 +1346,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupOperationResult' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/{groupJid}/settings/announcement:
     post:
@@ -1295,6 +1368,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupOperationResult' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/{groupJid}/settings/locked:
     post:
@@ -1315,6 +1390,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupOperationResult' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/{groupJid}/settings/member-add-mode:
     post:
@@ -1335,6 +1412,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupOperationResult' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/{groupJid}/settings/join-approval:
     post:
@@ -1355,6 +1434,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupOperationResult' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/{groupJid}/pending:
     get:
@@ -1402,6 +1483,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupParticipantResults' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/{groupJid}/pending/reject:
     post:
@@ -1424,6 +1507,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupParticipantResults' }
+        '429':
+          description: ACCOUNT_BUSY / WORKER_BUSY，功能层按 details.retryAfterMs 后重试
 
   /v1/groups/health-report:
     post:
@@ -2193,6 +2278,7 @@ components:
           additionalProperties: true
           description: |
             错误详情。`NOT_OWNER` 时包含 accountId/currentWorkerId/ownerWorkerId/ownerEndpoint，
+            `ACCOUNT_BUSY` / `WORKER_BUSY` / `RECONNECT_LIMITED` 时包含 retryAfterMs/cooldownUntil/reason，
             业务层应刷新 owner 后直连 ownerEndpoint 重试一次。
 
     Evidence:
@@ -2268,6 +2354,9 @@ components:
         - BANNED
         - LOGGED_OUT
         - PROXY_CHANGED
+        - ACCOUNT_BUSY
+        - WORKER_BUSY
+        - RECONNECT_LIMITED
         - UNKNOWN
 
     OnlineResult:
@@ -2284,6 +2373,41 @@ components:
           description: 本次 online 请求被协议层接收并完成本地状态同步的时间
         routing:
           $ref: '#/components/schemas/RoutingInfo'
+
+    ReconnectBody:
+      type: object
+      properties:
+        reason:
+          type: string
+          enum: [proxy_changed, manual, stale, task_recover]
+          default: manual
+          description: 功能层触发本次重连的原因
+        proxy:
+          $ref: '#/components/schemas/ProxyBinding'
+        force:
+          type: boolean
+          default: false
+          description: 预留字段。当前不绕过 Redis 限流，用于审计功能层是否强制恢复任务。
+
+    ReconnectResult:
+      type: object
+      required: [accountId, accepted, alreadyInFlight, state, retryAfterMs, cooldownUntil]
+      properties:
+        accountId: { type: string }
+        accepted: { type: boolean, example: true }
+        alreadyInFlight:
+          type: boolean
+          description: true 表示账号本来已处于 RECONNECTING，本次请求只刷新了重连动作
+        state:
+          type: string
+          example: RECONNECTING
+        retryAfterMs:
+          type: integer
+          nullable: true
+        cooldownUntil:
+          type: string
+          format: date-time
+          nullable: true
 
     ProbeResult:
       type: object
@@ -3955,6 +4079,86 @@ webhooks:
                 accountId: { type: string }
                 retryAfterMs: { type: integer, nullable: true }
                 raw: { type: object, additionalProperties: true }
+
+  account.reconnect_requested:
+    post:
+      summary: 功能层请求账号重连已被接受
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
+                event: { type: string, enum: [account.reconnect_requested] }
+                accountId: { type: string }
+                fromState: { type: string }
+                state: { type: string, example: RECONNECTING }
+                reason: { type: string, enum: [proxy_changed, manual, stale, task_recover] }
+                force: { type: boolean }
+                proxySessionId: { type: string }
+                proxyCountry: { type: string }
+                alreadyInFlight: { type: boolean }
+                workerId: { type: string }
+                requestedAt: { type: string, format: date-time }
+
+  account.reconnect_limited:
+    post:
+      summary: 重连风暴保护命中
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
+                event: { type: string, enum: [account.reconnect_limited] }
+                accountId: { type: string }
+                state: { type: string }
+                retryAfterMs: { type: integer }
+                cooldownUntil: { type: string, format: date-time }
+                reason:
+                  type: string
+                  enum: [account_reconnect_cooldown, global_reconnect_limited, worker_reconnect_limited, reconnect_limited]
+                requestedReason: { type: string }
+                force: { type: boolean }
+                workerId: { type: string }
+                occurredAt: { type: string, format: date-time }
+
+  account.group_busy:
+    post:
+      summary: 单账号群写操作忙碌
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
+                event: { type: string, enum: [account.group_busy] }
+                accountId: { type: string }
+                operation: { type: string }
+                retryAfterMs: { type: integer }
+                cooldownUntil: { type: string, format: date-time }
+                reason: { type: string, example: account_group_operation_in_progress }
+
+  account.worker_busy:
+    post:
+      summary: worker 群写操作令牌耗尽
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
+                event: { type: string, enum: [account.worker_busy] }
+                accountId: { type: string }
+                operation: { type: string }
+                workerId: { type: string }
+                retryAfterMs: { type: integer }
+                cooldownUntil: { type: string, format: date-time }
+                reason: { type: string, example: worker_group_operation_limited }
 
   pairing.completed:
     post:

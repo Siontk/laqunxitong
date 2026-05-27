@@ -433,6 +433,10 @@ Kafka message key 固定为 `accountId`，同账号事件在同一 partition 内
 | `account.banned` | 账号被封/设备移除，功能层标记不可用 |
 | `account.logout` | 主动或远端 logout，功能层停止调度 |
 | `account.rate_limited` | 暂停下发任务 |
+| `account.reconnect_requested` | 协议层已接受功能层重连请求 |
+| `account.reconnect_limited` | 重连风暴保护命中，按 retryAfterMs/cooldownUntil 调度 |
+| `account.group_busy` | 同账号群写操作忙碌，功能层延迟重试 |
+| `account.worker_busy` | worker 群写 token bucket 耗尽，功能层降低该 owner 并发 |
 | `account.restricted` | 暂停下发任务到 restrictedUntil |
 | `account.new_chat_capping` | CAPPED 时停拉群 |
 | `account.owner_assigned` | 写入功能层 owner cache |

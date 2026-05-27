@@ -34,6 +34,7 @@ import {
 import { Registry } from './registry/registry.js'
 import { Master } from './registry/master.js'
 import { TokenBucketReconnectGate } from './rate-limit/reconnect-limiter.js'
+import { OperationGate } from './rate-limit/operation-gate.js'
 import { AccountManager } from './worker/account-manager.js'
 import { StaleDetector } from './worker/stale-detector.js'
 import { AssignmentReconciler } from './worker/assignment-reconciler.js'
@@ -48,10 +49,28 @@ async function main(): Promise<void> {
 
   // ── 依赖装配 ──
   const redis = createRedis(config.redis.url, config.redis.db)
-  await redis.ping()
-  logger.info('redis connected')
+  const registryRedis = config.redis.registryUrl ? createRedis(config.redis.registryUrl, config.redis.db) : redis
+  const keysRedis = config.redis.keysUrl ? createRedis(config.redis.keysUrl, config.redis.db) : redis
+  const rateLimitRedis = config.redis.rateLimitUrl ? createRedis(config.redis.rateLimitUrl, config.redis.db) : redis
+  const runtimeRedis = config.redis.runtimeUrl ? createRedis(config.redis.runtimeUrl, config.redis.db) : redis
+  await Promise.all([
+    redis.ping(),
+    registryRedis.ping(),
+    keysRedis.ping(),
+    rateLimitRedis.ping(),
+    runtimeRedis.ping()
+  ])
+  logger.info(
+    {
+      registryDedicated: registryRedis !== redis,
+      keysDedicated: keysRedis !== redis,
+      rateLimitDedicated: rateLimitRedis !== redis,
+      runtimeDedicated: runtimeRedis !== redis
+    },
+    'redis connected'
+  )
 
-  const registry = new Registry(redis, logger, config.redis.keyPrefix)
+  const registry = new Registry(registryRedis, logger, config.redis.keyPrefix)
 
   const publisher = await createEventPublisher(config, metrics, logger)
 
@@ -60,7 +79,7 @@ async function main(): Promise<void> {
   const keysL1 = new MemoryStoreAdapter<Record<string, unknown>>(500_000)
   // L2
   const credsL2 = new RedisStoreAdapter<Record<string, unknown>>(redis, config.redis.keyPrefix)
-  const keysL2 = new RedisStoreAdapter<Record<string, unknown>>(redis, config.redis.keyPrefix)
+  const keysL2 = new RedisStoreAdapter<Record<string, unknown>>(keysRedis, config.redis.keyPrefix)
   // L3
   let credsL3: StoreAdapter<Record<string, unknown>> | undefined
   if (config.mysql.enabled) {
@@ -74,23 +93,24 @@ async function main(): Promise<void> {
   const credsStore = new CredsStore({ l1: credsL1, l2: credsL2, l3: credsL3, metrics, logger })
   const keysStore = new KeysStore({ l1: keysL1, l2: keysL2, metrics, logger })
   const proxyStore = new ProxyStore({
-    l2: new RedisStoreAdapter(redis, config.redis.keyPrefix),
+    l2: new RedisStoreAdapter(runtimeRedis, config.redis.keyPrefix),
     logger
   })
   const runtimeStore = new AccountRuntimeStore(
-    new RedisStoreAdapter<AccountRuntimeRecord>(redis, config.redis.keyPrefix),
+    new RedisStoreAdapter<AccountRuntimeRecord>(runtimeRedis, config.redis.keyPrefix),
     logger
   )
   const deviceStore = new AccountDeviceStore(
-    new RedisStoreAdapter<AccountDeviceProfile>(redis, config.redis.keyPrefix),
+    new RedisStoreAdapter<AccountDeviceProfile>(runtimeRedis, config.redis.keyPrefix),
     logger
   )
   const browserDisplayStore = new AccountBrowserDisplayStore(
-    new RedisStoreAdapter<BrowserDisplay>(redis, config.redis.keyPrefix),
+    new RedisStoreAdapter<BrowserDisplay>(runtimeRedis, config.redis.keyPrefix),
     logger
   )
 
-  const gate = new TokenBucketReconnectGate(config, redis, logger)
+  const gate = new TokenBucketReconnectGate(config, rateLimitRedis, logger)
+  const operationGate = new OperationGate({ redis: rateLimitRedis, config, logger, metrics, publisher })
   const accounts = new AccountManager({
     config,
     logger,
@@ -109,7 +129,7 @@ async function main(): Promise<void> {
   let assignmentReconciler: AssignmentReconciler | null = null
 
   if (config.role === 'master' || config.role === 'standalone') {
-    master = new Master({ registry, redis, publisher, logger, metrics, config: { nodeId: config.nodeId } })
+    master = new Master({ registry, redis: registryRedis, publisher, logger, metrics, config: { nodeId: config.nodeId } })
     await master.start()
   }
 
@@ -146,6 +166,27 @@ async function main(): Promise<void> {
         .heartbeat(config.workerId, accounts.activeSize(), { force: true })
         .catch(err => logger.warn({ err }, 'periodic force load sync failed'))
     }, 60 * 60_000).unref()
+
+    if (config.worker.heartbeatEventEnabled) {
+      setInterval(() => {
+        const reportedAt = new Date().toISOString()
+        for (const accountId of accounts.listAccounts()) {
+          publisher.publish('account.heartbeat', accountId, {
+            accountId,
+            state: accounts.getState(accountId),
+            activeSize: accounts.activeSize(),
+            workerId: config.workerId,
+            reportedAt
+          }, accounts.getEvidence(accountId)).catch(err =>
+            logger.warn({ err, accountId }, 'account heartbeat event publish failed')
+          )
+        }
+      }, config.worker.heartbeatEventIntervalMs).unref()
+      logger.info(
+        { intervalMs: config.worker.heartbeatEventIntervalMs },
+        'account heartbeat Kafka events enabled'
+      )
+    }
 
     // STALE 兜底
     staleDetector = new StaleDetector(
@@ -195,7 +236,11 @@ async function main(): Promise<void> {
     logger,
     isReady: async () => {
       const r = await redis.ping().then(() => true).catch(() => false)
-      return r && publisher.isReady()
+      const rr = await registryRedis.ping().then(() => true).catch(() => false)
+      const kr = await keysRedis.ping().then(() => true).catch(() => false)
+      const lr = await rateLimitRedis.ping().then(() => true).catch(() => false)
+      const tr = await runtimeRedis.ping().then(() => true).catch(() => false)
+      return r && rr && kr && lr && tr && publisher.isReady()
     },
     isLive: async () => true
   })
@@ -223,6 +268,8 @@ async function main(): Promise<void> {
     logger,
     metrics,
     publisher,
+    operationGate,
+    reconnectGate: gate,
     accounts,
     registry,
     credsStore,
@@ -250,7 +297,10 @@ async function main(): Promise<void> {
       await app.close()
       await publisher.close()
       if (credsL3?.close) await credsL3.close().catch(() => {})
-      if ('quit' in redis) await (redis as { quit: () => Promise<unknown> }).quit().catch(() => {})
+      const clients = new Set([redis, registryRedis, keysRedis, rateLimitRedis, runtimeRedis])
+      await Promise.all(
+        [...clients].map(client => ('quit' in client ? (client as { quit: () => Promise<unknown> }).quit().catch(() => {}) : Promise.resolve()))
+      )
     } catch (err) {
       logger.error({ err }, 'shutdown error')
     } finally {

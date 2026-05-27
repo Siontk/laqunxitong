@@ -56,6 +56,18 @@ STALE_CHECK_INTERVAL_MS=5000
 STALE_THRESHOLD_MS=35000
 NODE_RECONNECT_PER_SEC=10
 GLOBAL_RECONNECT_PER_SEC=50
+ACCOUNT_RECONNECT_COOLDOWN_MS=60000
+RECONNECT_BURST=20
+WORKER_GROUP_OP_PER_SEC=10
+WORKER_GROUP_OP_BURST=20
+GROUP_ACCOUNT_LOCK_TTL_MS=30000
+GROUP_ACCOUNT_BUSY_RETRY_MS=3000
+WORKER_GROUP_BUSY_RETRY_MS=5000
+HEARTBEAT_EVENT_ENABLED=false
+HEARTBEAT_EVENT_INTERVAL_MS=300000
+AUDIT_LOG_SUCCESS_ENABLED=true
+AUDIT_LOG_SAMPLE_RATE=1
+SLOW_OPERATION_MS=3000
 COLD_START_BATCH_SIZE=50
 COLD_START_INTERVAL_MS=30000
 BAILEYS_SYNC_HISTORY=false
@@ -116,6 +128,21 @@ Worker 受 SIGTERM 时优雅退出（注销 Registry + 关 ws），Registry mast
 | `HTTP_PORT` | 8080 | HTTP 端口 |
 | `API_KEYS` | 空 | 可选，逗号分隔；配置后所有 `/v1/*` 要求 `x-api-key` 或 `Authorization: Bearer` |
 | `REDIS_URL` | redis://localhost:6379 | 含 cluster（逗号分隔多节点） |
+| `REGISTRY_REDIS_URL` | 空 | Registry / owner / master lock 专用 Redis；空则复用 REDIS_URL |
+| `KEYS_REDIS_URL` | 空 | Baileys keys 专用 Redis；账号量上来后必须拆出 |
+| `RATELIMIT_REDIS_URL` | 空 | reconnect 和 group-op 限流专用 Redis |
+| `RUNTIME_REDIS_URL` | 空 | proxy/runtime/device/browser display 专用 Redis |
+| `ACCOUNT_RECONNECT_COOLDOWN_MS` | 60000 | 单账号重连冷却，防止换 IP / 异常状态重连风暴 |
+| `RECONNECT_BURST` | 20 | 重连 token bucket 突发容量下限 |
+| `WORKER_GROUP_OP_PER_SEC` | 10 | 单 worker 群写操作令牌速率 |
+| `WORKER_GROUP_OP_BURST` | 20 | 单 worker 群写操作突发容量 |
+| `GROUP_ACCOUNT_LOCK_TTL_MS` | 30000 | 单账号群写锁 TTL；partial 超时后保留到 TTL |
+| `GROUP_ACCOUNT_BUSY_RETRY_MS` | 3000 | ACCOUNT_BUSY 建议重试间隔 |
+| `WORKER_GROUP_BUSY_RETRY_MS` | 5000 | WORKER_BUSY 建议重试间隔 |
+| `HEARTBEAT_EVENT_ENABLED` | false | 是否发布账号级 Kafka heartbeat；默认关闭避免大规模事件量 |
+| `HEARTBEAT_EVENT_INTERVAL_MS` | 300000 | 账号级 Kafka heartbeat 间隔 |
+| `AUDIT_LOG_SUCCESS_ENABLED` | true | 是否打印成功审计日志 |
+| `AUDIT_LOG_SAMPLE_RATE` | 1 | 成功审计日志采样率，0-1 |
 | `EVENT_BACKEND` | kafka | 事件后端，当前生产只支持 kafka |
 | `EVENT_DLQ_DIR` | /tmp/unsea-event-dlq | 事件发布失败后的本地 DLQ jsonl 目录，生产建议挂持久卷 |
 | `KAFKA_BROKERS` | localhost:9092 | Kafka/MSK broker，逗号分隔 |

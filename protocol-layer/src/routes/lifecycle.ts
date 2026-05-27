@@ -6,7 +6,7 @@ import { z } from 'zod'
 
 import type { RouteRegistrar } from './_context.js'
 import { auditInfo, auditWarn } from './audit-log.js'
-import { NotOwnerError } from '../error/error-handler.js'
+import { NotOwnerError, ProtocolError } from '../error/error-handler.js'
 import type { AccountDeviceProfile, BrowserDisplay, BrowserDisplayPlatform, DevicePlatform } from '../store/account-device-store.js'
 import { browserFromDisplay } from '../worker/socket-browser.js'
 
@@ -39,6 +39,11 @@ const OnlineBody = z.object({
   proxy: ProxyShape.optional(),
   deviceProfile: DeviceProfileBody.optional(),
   browserDisplay: BrowserDisplayBody.optional()
+}).passthrough()
+const ReconnectBody = z.object({
+  reason: z.enum(['proxy_changed', 'manual', 'stale', 'task_recover']).default('manual'),
+  proxy: ProxyShape.optional(),
+  force: z.boolean().default(false)
 }).passthrough()
 
 export const registerLifecycleRoutes: RouteRegistrar = (app, ctx) => {
@@ -114,6 +119,88 @@ export const registerLifecycleRoutes: RouteRegistrar = (app, ctx) => {
     await ctx.accounts.offline(accountId)
     auditInfo(ctx.logger, 'account.offline', { accountId, reason: 'manual' })
     reply.send({ ok: true })
+  })
+
+  app.post('/v1/accounts/:accountId/reconnect', async (req, reply) => {
+    const { accountId } = AccountIdParam.parse(req.params)
+    const body = ReconnectBody.parse(req.body ?? {})
+    const currentState = ctx.accounts.getState(accountId)
+    if (currentState === 'NEED_REAUTH' || currentState === 'LOGGED_OUT' || currentState === 'DEVICE_REMOVED') {
+      throw new ProtocolError(422, 'NEED_REAUTH', `account ${accountId} cannot reconnect from ${currentState}`, {
+        accountId,
+        state: currentState,
+        reason: 'terminal_state'
+      })
+    }
+
+    const limit = await ctx.reconnectGate.tryManualReconnect(accountId)
+    if (!limit.allowed) {
+      await ctx.publisher.publish('account.reconnect_limited', accountId, {
+        accountId,
+        state: currentState,
+        retryAfterMs: limit.retryAfterMs,
+        cooldownUntil: limit.cooldownUntil,
+        reason: limit.reason ?? 'reconnect_limited',
+        requestedReason: body.reason,
+        force: body.force,
+        workerId: ctx.config.workerId,
+        occurredAt: new Date().toISOString()
+      })
+      auditWarn(ctx.logger, 'account.reconnect.limited', {
+        accountId,
+        state: currentState,
+        retryAfterMs: limit.retryAfterMs,
+        cooldownUntil: limit.cooldownUntil,
+        reason: limit.reason
+      })
+      throw new ProtocolError(429, 'RECONNECT_LIMITED', `account ${accountId} reconnect limited`, {
+        accountId,
+        retryAfterMs: limit.retryAfterMs,
+        cooldownUntil: limit.cooldownUntil,
+        reason: limit.reason
+      })
+    }
+
+    const proxy = body.proxy ?? await ctx.proxyStore.get(accountId)
+    if (!proxy) {
+      auditWarn(ctx.logger, 'account.reconnect.rejected', { accountId, reason: 'PROXY_REQUIRED' })
+      return reply.code(400).send({
+        code: 'PROXY_REQUIRED',
+        message: 'proxy binding missing — call /proxy/bind first or include in body'
+      })
+    }
+    if (body.proxy) await ctx.proxyStore.bind(accountId, body.proxy)
+
+    const result = await ctx.accounts.requestReconnect(accountId, body.reason, proxy)
+    await ctx.publisher.publish('account.reconnect_requested', accountId, {
+      accountId,
+      fromState: currentState,
+      state: result.state,
+      reason: body.reason,
+      force: body.force,
+      proxySessionId: proxy.sessionId,
+      proxyCountry: proxy.country,
+      alreadyInFlight: result.alreadyInFlight,
+      workerId: ctx.config.workerId,
+      requestedAt: new Date().toISOString()
+    })
+    auditInfo(ctx.logger, 'account.reconnect.accepted', {
+      accountId,
+      fromState: currentState,
+      state: result.state,
+      reason: body.reason,
+      proxySessionId: proxy.sessionId,
+      proxyCountry: proxy.country,
+      alreadyInFlight: result.alreadyInFlight
+    })
+    reply.code(202).send({
+      accountId,
+      accepted: true,
+      alreadyInFlight: result.alreadyInFlight,
+      state: result.state,
+      retryAfterMs: null,
+      cooldownUntil: null
+    })
   })
 
   app.post('/v1/accounts/:accountId/logout', async (req, reply) => {

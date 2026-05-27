@@ -35,7 +35,7 @@ import { ReconnectController, type ReconnectExecutor } from './reconnect.js'
 import type { ReconnectGate } from '../rate-limit/reconnect-limiter.js'
 import { attachEventBridge } from './event-bridge.js'
 import { detectAccountType } from './business-detector.js'
-import { AccountNotFoundError } from '../error/error-handler.js'
+import { AccountNotFoundError, ProtocolError } from '../error/error-handler.js'
 import type { StaleObserver } from './stale-detector.js'
 
 const ACTIVE_SLOT_STATES = new Set<AccountState>([
@@ -47,6 +47,8 @@ const ACTIVE_SLOT_STATES = new Set<AccountState>([
   'PROXY_FAILED',
   'RATE_LIMITED'
 ])
+
+const TERMINAL_RECONNECT_STATES = new Set<AccountState>(['NEED_REAUTH', 'LOGGED_OUT', 'DEVICE_REMOVED'])
 
 interface AccountContext {
   accountId: string
@@ -169,6 +171,31 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
       }
     }
     // 上层会通过 close 事件触发 reconnect.schedule
+  }
+
+  async requestReconnect(accountId: string, reason: string, proxy?: ProxyBinding): Promise<{
+    state: AccountState
+    alreadyInFlight: boolean
+  }> {
+    const ctx = this.requireCtx(accountId)
+    if (TERMINAL_RECONNECT_STATES.has(ctx.state.state)) {
+      throw new ProtocolError(422, 'NEED_REAUTH', `account ${accountId} cannot reconnect from ${ctx.state.state}`, {
+        accountId,
+        state: ctx.state.state,
+        reason: 'terminal_state'
+      })
+    }
+
+    if (proxy) ctx.proxy = proxy
+    const alreadyInFlight = ctx.state.state === 'RECONNECTING'
+    if (!alreadyInFlight) {
+      this.publishStateChange(ctx, 'RECONNECTING', `manual_reconnect:${reason}`)
+    }
+    await this.openSocket(ctx)
+    return {
+      state: ctx.state.state,
+      alreadyInFlight
+    }
   }
 
   /** 触发主动 probe（关键操作前用） */

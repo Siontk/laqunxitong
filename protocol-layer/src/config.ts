@@ -54,6 +54,10 @@ const ConfigSchema = z.object({
   // ── Redis（L2 keys + Registry + 令牌桶）──
   redis: z.object({
     url: z.string().default('redis://localhost:6379'),
+    registryUrl: z.string().optional(),
+    keysUrl: z.string().optional(),
+    rateLimitUrl: z.string().optional(),
+    runtimeUrl: z.string().optional(),
     db: z.coerce.number().default(0),
     keyPrefix: z.string().default('unsea:')
   }),
@@ -71,13 +75,22 @@ const ConfigSchema = z.object({
     staleCheckIntervalMs: z.coerce.number().default(5_000),
     staleThresholdMs: z.coerce.number().default(35_000),
     maxOldSpaceMB: z.coerce.number().default(1280),
-    heartbeatIntervalMs: z.coerce.number().default(30_000)
+    heartbeatIntervalMs: z.coerce.number().default(30_000),
+    heartbeatEventEnabled: z.coerce.boolean().default(false),
+    heartbeatEventIntervalMs: z.coerce.number().default(300_000)
   }),
 
   // ── 重连风暴控制 ──
   rateLimit: z.object({
     nodeReconnectPerSec: z.coerce.number().default(10),
     globalReconnectPerSec: z.coerce.number().default(50),
+    accountReconnectCooldownMs: z.coerce.number().default(60_000),
+    reconnectBurst: z.coerce.number().default(20),
+    workerGroupOpPerSec: z.coerce.number().default(10),
+    workerGroupOpBurst: z.coerce.number().default(20),
+    groupAccountLockTtlMs: z.coerce.number().default(30_000),
+    groupAccountBusyRetryMs: z.coerce.number().default(3_000),
+    workerGroupBusyRetryMs: z.coerce.number().default(5_000),
     sessionIdJitterMaxSec: z.coerce.number().default(900),
     coldStartBatchSize: z.coerce.number().default(50),
     coldStartIntervalMs: z.coerce.number().default(30_000)
@@ -106,7 +119,10 @@ const ConfigSchema = z.object({
   // ── 日志 ──
   log: z.object({
     level: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
-    pretty: z.coerce.boolean().default(false)
+    pretty: z.coerce.boolean().default(false),
+    auditSuccessEnabled: z.coerce.boolean().default(true),
+    auditSampleRate: z.coerce.number().min(0).max(1).default(1),
+    slowOperationMs: z.coerce.number().default(3_000)
   }),
 
   // ── 环境 ──
@@ -153,6 +169,10 @@ export function loadConfig(): Config {
     },
     redis: {
       url: process.env.REDIS_URL,
+      registryUrl: process.env.REGISTRY_REDIS_URL,
+      keysUrl: process.env.KEYS_REDIS_URL,
+      rateLimitUrl: process.env.RATELIMIT_REDIS_URL,
+      runtimeUrl: process.env.RUNTIME_REDIS_URL,
       db: process.env.REDIS_DB,
       keyPrefix: process.env.REDIS_KEY_PREFIX
     },
@@ -166,11 +186,20 @@ export function loadConfig(): Config {
       staleCheckIntervalMs: process.env.STALE_CHECK_INTERVAL_MS,
       staleThresholdMs: process.env.STALE_THRESHOLD_MS,
       maxOldSpaceMB: process.env.MAX_OLD_SPACE_MB,
-      heartbeatIntervalMs: process.env.HEARTBEAT_INTERVAL_MS
+      heartbeatIntervalMs: process.env.HEARTBEAT_INTERVAL_MS,
+      heartbeatEventEnabled: process.env.HEARTBEAT_EVENT_ENABLED,
+      heartbeatEventIntervalMs: process.env.HEARTBEAT_EVENT_INTERVAL_MS
     },
     rateLimit: {
       nodeReconnectPerSec: process.env.NODE_RECONNECT_PER_SEC,
       globalReconnectPerSec: process.env.GLOBAL_RECONNECT_PER_SEC,
+      accountReconnectCooldownMs: process.env.ACCOUNT_RECONNECT_COOLDOWN_MS,
+      reconnectBurst: process.env.RECONNECT_BURST,
+      workerGroupOpPerSec: process.env.WORKER_GROUP_OP_PER_SEC,
+      workerGroupOpBurst: process.env.WORKER_GROUP_OP_BURST,
+      groupAccountLockTtlMs: process.env.GROUP_ACCOUNT_LOCK_TTL_MS,
+      groupAccountBusyRetryMs: process.env.GROUP_ACCOUNT_BUSY_RETRY_MS,
+      workerGroupBusyRetryMs: process.env.WORKER_GROUP_BUSY_RETRY_MS,
       sessionIdJitterMaxSec: process.env.SESSION_JITTER_MAX_SEC,
       coldStartBatchSize: process.env.COLD_START_BATCH_SIZE,
       coldStartIntervalMs: process.env.COLD_START_INTERVAL_MS
@@ -204,7 +233,10 @@ export function loadConfig(): Config {
         | 'debug'
         | 'trace'
         | undefined,
-      pretty: process.env.LOG_PRETTY
+      pretty: process.env.LOG_PRETTY,
+      auditSuccessEnabled: process.env.AUDIT_LOG_SUCCESS_ENABLED,
+      auditSampleRate: process.env.AUDIT_LOG_SAMPLE_RATE,
+      slowOperationMs: process.env.SLOW_OPERATION_MS
     },
     env: process.env.NODE_ENV as 'dev' | 'staging' | 'prod' | undefined
   })
