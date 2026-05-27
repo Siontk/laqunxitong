@@ -221,22 +221,24 @@ POST /v1/groups/create
   "subject": "群名",
   "participants": ["918094787585", "914745668568"]
 }
-→ { groupJid, results: { groupJid, results: [{ jid, status: "200"|"403"|"408"|"409"|"419"|"500" }] } }
+→ { groupJid, results: { groupJid, partial, results: [{ jid, status: "OK", rawStatus: "200" }] } }
 ```
 
 ```http
 POST /v1/groups/{groupJid}/participants/add
-{ "accountId": "acc_001", "participants": ["918..."] }
-→ { groupJid, results: [{ jid, status, content }] }
+{ "accountId": "acc_001", "participants": ["918..."], "timeoutMs": 30000 }
+→ { groupJid, partial, timeoutMs, results: [{ jid, status, rawStatus }] }
 ```
 
-**per-participant status 码**：
-- `200` 成功
-- `403` 对方隐私阻止（"who can add me" 设置）
-- `408` 超时
-- `409` 已在群
-- `419` 群满
-- `500` 服务端错误
+**per-participant status 语义码**：
+- `OK` 成功
+- `PRIVACY_BLOCKED` 对方隐私阻止（"who can add me" 设置）
+- `TIMEOUT` 超时
+- `ALREADY_IN` 已在群
+- `GROUP_FULL` 群满
+- `SERVER_ERROR` 服务端错误
+
+`rawStatus` 保留 WhatsApp/Baileys 原始数字码，功能层判断业务结果用 `status`。
 
 ### 6.2 群管理
 
@@ -244,6 +246,7 @@ POST /v1/groups/{groupJid}/participants/add
 |---|---|
 | 改群名 | `POST /v1/groups/{jid}/subject` |
 | 改群描述 | `POST /v1/groups/{jid}/description` |
+| 设置公告文本 | `POST /v1/groups/{jid}/announcement-text`，当前按群描述落地，返回 `appliedAs=description` |
 | 改群头像 | `POST /v1/groups/{jid}/picture` |
 | 升/降管理员 | `POST /v1/groups/{jid}/participants/{promote,demote}` |
 | 移除成员 | `POST /v1/groups/{jid}/participants/remove` |
@@ -255,6 +258,7 @@ POST /v1/groups/{groupJid}/participants/add
 ### 6.3 邀请 code
 
 ```http
+POST /v1/groups/preview                  → { groupJid, subject, memberCount, isBanned, ownerJid, previewAt }
 GET  /v1/groups/{jid}/invite-code         → { inviteCode, inviteUrl }
 POST /v1/groups/{jid}/invite/revoke       → { 新 inviteCode }
 POST /v1/groups/join                      → { groupJid, joined }
@@ -276,6 +280,7 @@ GET  /v1/groups/{jid}/metadata             → 群详情
 GET  /v1/groups/{jid}/participants         → 成员列表
 GET  /v1/accounts/{id}/groups              → 账号所有群
 POST /v1/groups/{jid}/leave                → 退群
+POST /v1/groups/health-report              → 批量回报链接健康度，只发布 Kafka，不写业务库
 ```
 
 ---
@@ -322,7 +327,7 @@ POST /v1/messages/{messageId}/download
 → { mimetype, sizeBytes, base64?, url? }
 ```
 
-- `returnAs: "url"` 推荐生产用（协议层 S3 缓存返 signed URL）
+- 生产环境媒体落库、对象存储和 signed URL 生命周期由功能层负责；协议层只负责按 URL 发送或按完整 message 解密下载
 - 必须传完整 message 对象，仅传 key 无法解密
 
 ---
@@ -410,7 +415,7 @@ Kafka message key 固定为 `accountId`，同账号事件在同一 partition 内
 | `protocol.account.events.v1` | account.* 状态/风控事件 |
 | `protocol.owner.events.v1` | account.owner_assigned / changed / unassigned |
 | `protocol.message.events.v1` | message.received / message.ack |
-| `protocol.group.events.v1` | group.participant_changed / metadata_updated |
+| `protocol.group.events.v1` | group.participant_changed / metadata_updated / health_reported |
 | `protocol.pairing.events.v1` | pairing.* / qr.* |
 
 | 事件 | 业务侧用法 |
@@ -423,6 +428,10 @@ Kafka message key 固定为 `accountId`，同账号事件在同一 partition 内
 | `account.type_detected` | 写库 accountType |
 | `account.proxy_failed` | 触发 ProxyAllocator 换 session |
 | `account.proxy_rotated` | 信息（IP 实际变化）|
+| `account.proxy_changed` | 代理绑定变化，功能层同步账号代理状态 |
+| `account.risk_triggered` | 风险触发，暂停任务到 cooldownUntil |
+| `account.banned` | 账号被封/设备移除，功能层标记不可用 |
+| `account.logout` | 主动或远端 logout，功能层停止调度 |
 | `account.rate_limited` | 暂停下发任务 |
 | `account.restricted` | 暂停下发任务到 restrictedUntil |
 | `account.new_chat_capping` | CAPPED 时停拉群 |
@@ -437,6 +446,7 @@ Kafka message key 固定为 `accountId`，同账号事件在同一 partition 内
 | `message.ack` | 跟踪自己发的消息 |
 | `group.participant_changed` | 群成员动态 |
 | `group.metadata_updated` | 群信息变更 |
+| `group.health_reported` | 群链接健康度回报，功能层消费后写自己的业务库 |
 
 每条事件 payload 都带 `evidence + occurredAt + workerId`，便于业务侧乱序检测。
 

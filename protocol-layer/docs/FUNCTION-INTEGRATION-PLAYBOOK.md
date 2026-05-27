@@ -6,7 +6,8 @@
 
 ## 1. 联调目标
 
-功能层只调用统一协议入口和 Kafka 事件，不关心账号具体在哪台机器。
+功能层不参与账号分配；账号绑定、导入、failover 后由协议层决定 owner worker。
+功能层需要缓存协议层返回的 `ownerEndpoint`，账号级 HTTP 请求直连 owner worker。
 
 协议层负责：
 
@@ -21,6 +22,9 @@
 - 对象存储和媒体 URL
 - owner cache、账号状态表、消息记录
 - Kafka consumer group 和业务落库
+
+协议层 Redis 和 MySQL 都是内部存储。功能层不要直接读协议 Redis/MySQL：
+Redis 用于 Registry、runtime、Signal keys、限流；MySQL 只用于协议账号凭据 L3 冷持久化。功能层的账号状态、任务、消息、群链接健康度都写功能层自己的业务库。
 
 ## 2. 环境配置
 
@@ -114,6 +118,18 @@ account.owner_changed    update owner cache
 account.owner_unassigned delete owner cache
 ```
 
+账号状态/异常建议消费：
+
+```text
+account.state_changed    更新账号状态机
+account.need_reauth      暂停任务；继续使用则重新 pairing，彻底放弃则 admin/unassign
+account.proxy_changed    同步账号代理绑定变化
+account.risk_triggered   暂停任务到 cooldownUntil
+account.banned           标记账号不可用
+account.logout           停止调度该账号
+group.health_reported    写功能层群链接健康表
+```
+
 建议缓存结构：
 
 ```json
@@ -179,7 +195,7 @@ Authorization: Bearer {apiKey}
 3. 拿到 `ownerEndpoint` 后直连 owner worker。
 4. 如果返回 `409 NOT_OWNER`，用错误详情里的 `ownerEndpoint` 刷新缓存并重试一次。
 
-不要每次都 resolve。批量任务只对 cache miss 的账号做 batch resolve。
+不要每次都 resolve，也不要功能层自己按 accountId 分桶。批量任务只对 cache miss 的账号做 batch resolve，然后按 `ownerEndpoint` 分组调用。
 
 ### 4.3 NOT_OWNER 示例
 
@@ -361,15 +377,18 @@ POST {ownerEndpoint}/v1/messages/document
 | 移除群成员 | `POST /v1/groups/{groupJid}/participants/remove` |
 | 设置管理员 | `POST /v1/groups/{groupJid}/participants/promote` |
 | 取消管理员 | `POST /v1/groups/{groupJid}/participants/demote` |
+| 解析群链接 | `POST /v1/groups/preview` |
 | 获取群信息 | `GET /v1/groups/{groupJid}/metadata?accountId=...` |
 | 获取所有群 | `GET /v1/accounts/{accountId}/groups` |
 | 获取群成员 | `GET /v1/groups/{groupJid}/participants?accountId=...` |
 | 设置群公告 / 仅管理员发言 | `POST /v1/groups/{groupJid}/settings/announcement` |
+| 设置群公告文本 | `POST /v1/groups/{groupJid}/announcement-text`，当前按群描述落地 |
 | 设置群描述 | `POST /v1/groups/{groupJid}/description` |
 | 获取群二维码 | `GET /v1/groups/{groupJid}/invite-code?accountId=...` |
 | 根据 code 进群 | `POST /v1/groups/join` |
-| 根据群链接进群 | `POST /v1/groups/join`，功能层从链接里解析 inviteCode |
+| 根据群链接进群 | `POST /v1/groups/join`，可直接传 `inviteLink` |
 | 退出群 | `POST /v1/groups/{groupJid}/leave` |
+| 回报群健康度 | `POST /v1/groups/health-report`，只发布 Kafka，不写业务库 |
 
 添加群成员示例：
 
@@ -382,9 +401,26 @@ POST {ownerEndpoint}/v1/groups/{groupJid}/participants/add
   "accountId": "acc_001",
   "participants": [
     "8613900000000@s.whatsapp.net"
+  ],
+  "timeoutMs": 30000
+}
+```
+
+返回：
+
+```json
+{
+  "groupJid": "120363424367770097@g.us",
+  "partial": true,
+  "timeoutMs": 30000,
+  "results": [
+    { "jid": "8613900000000@s.whatsapp.net", "status": "OK", "rawStatus": "200" },
+    { "jid": "8613911111111@s.whatsapp.net", "status": "PRIVACY_BLOCKED", "rawStatus": "403" }
   ]
 }
 ```
+
+功能层判断业务结果用 `status`，不要依赖 `rawStatus`。
 
 ## 8. 状态和异常
 

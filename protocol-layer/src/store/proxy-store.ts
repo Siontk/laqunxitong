@@ -6,7 +6,7 @@
  *   - 必须跨 worker 可见（账号漂移时新 worker 需要读到 binding）
  *   - 主存 L2 Redis（unsea:proxy:{accountId}），L1 内存做热缓存
  *
- * 不进 L3 PG —— binding 元数据由业务层 ProxyAllocator 持有，
+ * 不进 L3 MySQL —— binding 元数据由业务层 ProxyAllocator 持有，
  * 协议层只需要能"拿到当前应该用什么"即可。
  */
 

@@ -16,13 +16,22 @@ export const registerRestrictionRoutes: RouteRegistrar = (app, ctx) => {
     if (r.isActive) {
       ctx.metrics.restrictionActive.inc({ enforcement_type: r.enforcementType ?? 'DEFAULT' })
     }
+    const restrictedUntil = r.timeEnforcementEnds?.toISOString() ?? null
+    const riskLevel = r.isActive ? 'HIGH' : 'NONE'
+    const fetchedAt = new Date().toISOString()
     reply.send({
       accountId,
       isActive: !!r.isActive,
-      restrictedUntil: r.timeEnforcementEnds?.toISOString() ?? null,
+      restrictedUntil,
+      riskStartTime: null,
+      riskEndTime: restrictedUntil,
+      cooldownUntil: restrictedUntil,
+      riskLevel,
+      source: 'reachout_timelock',
+      detectedAt: fetchedAt,
       enforcementType: r.enforcementType ?? 'DEFAULT',
       raw: r,
-      fetchedAt: new Date().toISOString()
+      fetchedAt
     })
   })
 

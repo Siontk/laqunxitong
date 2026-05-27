@@ -87,6 +87,8 @@ export const registerLifecycleRoutes: RouteRegistrar = (app, ctx) => {
     reply.code(202).send({
       accountId,
       accepted: true,
+      stateSource: 'MANUAL_REFRESH',
+      syncedAt: new Date().toISOString(),
       routing: {
         ownerWorkerId: decision.workerId,
         ownerEndpoint: owner.worker?.endpoint ?? null,
@@ -105,6 +107,11 @@ export const registerLifecycleRoutes: RouteRegistrar = (app, ctx) => {
   app.post('/v1/accounts/:accountId/logout', async (req, reply) => {
     const { accountId } = AccountIdParam.parse(req.params)
     await ctx.accounts.logout(accountId)
+    await ctx.publisher.publish('account.logout', accountId, {
+      accountId,
+      reason: 'MANUAL',
+      ts: new Date().toISOString()
+    })
     reply.send({ ok: true })
   })
 }

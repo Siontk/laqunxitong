@@ -570,6 +570,9 @@ paths:
       responses:
         '202':
           description: 已发起上线，状态通过事件 `account.state_changed` 推送
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OnlineResult' }
 
   /v1/accounts/{accountId}/offline:
     post:
@@ -726,16 +729,12 @@ paths:
           description: 探活成功
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  ackedAt: { type: string, format: date-time }
-                  rttMs: { type: integer }
+              schema: { $ref: '#/components/schemas/ProbeResult' }
         '503':
           description: 3s 内未收到 ack
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              schema: { $ref: '#/components/schemas/ProbeResult' }
 
   /v1/accounts/check-whatsapp:
     post:
@@ -862,8 +861,43 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ProxyBindingResult' }
+    delete:
+      tags: [proxy]
+      summary: 删除当前代理绑定
+      operationId: deleteProxy
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: 已删除
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
 
   # ──────────────────── A.5 群组（P0 部分完整） ────────────────────
+  /v1/groups/preview:
+    post:
+      tags: [groups]
+      summary: 解析群邀请链接 / code
+      description: |
+        链接入池前使用。协议层只解析 WhatsApp invite 信息并返回预览，
+        链接池入库、健康度策略仍由功能层负责。
+      operationId: groupPreview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GroupPreviewBody' }
+      responses:
+        '200':
+          description: 群邀请预览
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupPreview' }
+
   /v1/groups/create:
     post:
       tags: [groups]
@@ -906,14 +940,7 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [accountId, participants]
-              properties:
-                accountId: { type: string }
-                participants:
-                  type: array
-                  items: { type: string }
+            schema: { $ref: '#/components/schemas/ParticipantsActionBody' }
       responses:
         '200':
           description: 每个成员的结果
@@ -1085,6 +1112,29 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupOperationResult' }
+
+  /v1/groups/{groupJid}/announcement-text:
+    post:
+      tags: [groups]
+      summary: 设置群公告文本（协议层按群描述落地）
+      description: |
+        WhatsApp Web / Baileys 当前没有独立“富文本公告”协议 API。
+        该接口用于满足功能层公告文本能力，协议层实际调用 `groupUpdateDescription`，
+        返回 `appliedAs=description`，功能层如需富文本模板仍应自行存储。
+      operationId: groupAnnouncementText
+      parameters:
+        - $ref: '#/components/parameters/GroupJidPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GroupAnnouncementTextBody' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupAnnouncementTextResult' }
 
   /v1/groups/{groupJid}/picture:
     post:
@@ -1344,6 +1394,26 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GroupParticipantResults' }
+
+  /v1/groups/health-report:
+    post:
+      tags: [groups]
+      summary: 批量回报群链接健康度
+      description: |
+        功能层巡检 GroupLink 后调用。协议层不保存业务库，只校验并发布
+        Kafka `group.health_reported` 事件，功能层消费后写自己的 MySQL。
+      operationId: groupHealthReport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GroupHealthReportBody' }
+      responses:
+        '200':
+          description: 已接收
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupHealthReportResult' }
 
   # ──────────────────── A.6 消息（P1/P2 完整 schema） ────────────────────
   /v1/messages/text:
@@ -2149,6 +2219,72 @@ components:
               description: false 表示账号尚未分配 owner
             resolvedAt: { type: string, format: date-time }
 
+    StateSource:
+      type: string
+      enum: [HEARTBEAT, MANUAL_REFRESH, TASK_REPORT, IMPORT, PAIRING, RECONNECT, UNKNOWN]
+      description: 状态来源。手动 HTTP 查询/online 通常为 MANUAL_REFRESH，心跳事件为 HEARTBEAT。
+
+    ErrorCode:
+      type: string
+      enum:
+        - OK
+        - PRIVACY_BLOCKED
+        - TIMEOUT
+        - ALREADY_IN
+        - GROUP_FULL
+        - SERVER_ERROR
+        - PROBE_TIMEOUT
+        - REACHOUT_TIMELOCK
+        - BANNED
+        - LOGGED_OUT
+        - PROXY_CHANGED
+        - UNKNOWN
+
+    OnlineResult:
+      type: object
+      required: [accountId, accepted, stateSource, syncedAt, routing]
+      properties:
+        accountId: { type: string }
+        accepted: { type: boolean, example: true }
+        stateSource:
+          $ref: '#/components/schemas/StateSource'
+        syncedAt:
+          type: string
+          format: date-time
+          description: 本次 online 请求被协议层接收并完成本地状态同步的时间
+        routing:
+          $ref: '#/components/schemas/RoutingInfo'
+
+    ProbeResult:
+      type: object
+      required: [ok, probedAt, latencyMs, reasonCode]
+      properties:
+        ok:
+          type: boolean
+          description: true 表示 3 秒内收到 WA ping ack
+        ackedAt:
+          type: string
+          format: date-time
+          nullable: true
+        probedAt: { type: string, format: date-time }
+        latencyMs:
+          type: integer
+          nullable: true
+          description: 端到端探测耗时，失败时为 null
+        rttMs:
+          type: integer
+          nullable: true
+          description: 兼容旧字段，等同 latencyMs
+        reasonCode:
+          $ref: '#/components/schemas/ErrorCode'
+        code:
+          type: string
+          nullable: true
+          example: PROBE_TIMEOUT
+        message:
+          type: string
+          nullable: true
+
     # ──── 代理 ────
     ProxyBinding:
       type: object
@@ -2565,6 +2701,17 @@ components:
             - NEED_REAUTH
             - LOGGED_OUT
             - DEVICE_REMOVED
+        stateSource:
+          $ref: '#/components/schemas/StateSource'
+        lastStateSyncTime:
+          type: string
+          format: date-time
+          description: 协议层最后一次同步该账号 runtime 状态的时间
+        cooldownUntil:
+          type: string
+          format: date-time
+          nullable: true
+          description: 当前风控/限流冷却结束时间；无冷却时为 null
         evidence: { $ref: '#/components/schemas/Evidence' }
         needReauth: { type: boolean }
         reauthReason: { type: string, nullable: true }
@@ -2604,6 +2751,31 @@ components:
         accountId: { type: string }
         isActive: { type: boolean }
         restrictedUntil: { type: string, format: date-time, nullable: true }
+        riskStartTime:
+          type: string
+          format: date-time
+          nullable: true
+          description: 风险开始时间；协议无法从 WA 返回值判定时为 null
+        riskEndTime:
+          type: string
+          format: date-time
+          nullable: true
+          description: 风险结束时间，通常等同 restrictedUntil
+        cooldownUntil:
+          type: string
+          format: date-time
+          nullable: true
+          description: 功能层可用的冷却截止时间，通常等同 restrictedUntil
+        riskLevel:
+          type: string
+          enum: [NONE, LOW, MEDIUM, HIGH]
+        source:
+          type: string
+          enum: [reachout_timelock, message_cap, protocol, manual, unknown]
+        detectedAt:
+          type: string
+          format: date-time
+          description: 本次协议层检测到风险状态的时间
         enforcementType:
           type: string
           enum:
@@ -2703,6 +2875,14 @@ components:
           type: array
           items: { $ref: '#/components/schemas/GroupParticipant' }
         size: { type: integer }
+        isBanned:
+          type: boolean
+          description: 协议可判定时返回真实值，当前无法判断时默认 false
+        lastActivityAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: 协议可获得最近活跃时间时返回，否则 null
         announce: { type: boolean }
         restrict: { type: boolean }
 
@@ -2710,6 +2890,12 @@ components:
       type: object
       properties:
         groupJid: { type: string }
+        partial:
+          type: boolean
+          description: true 表示至少一个 participant 未成功
+        timeoutMs:
+          type: integer
+          description: 功能层传入的本次操作超时时间，协议层原样返回便于审计
         results:
           type: array
           items:
@@ -2717,8 +2903,10 @@ components:
             properties:
               jid: { type: string }
               status:
+                $ref: '#/components/schemas/ErrorCode'
+              rawStatus:
                 type: string
-                description: "200=OK, 403=隐私阻止, 408=超时, 409=已在群, 419=群满, 500=服务端错误"
+                description: WhatsApp/Baileys 原始状态码，例如 200/403/408/409/419/500
                 example: "200"
 
     # ──── 群组操作请求 body ────
@@ -2734,6 +2922,37 @@ components:
           items:
             type: string
             example: "918094787585"
+        timeoutMs:
+          type: integer
+          minimum: 1
+          maximum: 120000
+          default: 30000
+          description: 功能层期望的单次群成员操作超时时间，协议层用于请求校验并在响应中回显
+
+    GroupPreviewBody:
+      type: object
+      required: [accountId, inviteLink]
+      properties:
+        accountId: { type: string }
+        inviteLink:
+          type: string
+          description: 可传完整 `https://chat.whatsapp.com/...` 链接，也可直接传 invite code
+          example: "https://chat.whatsapp.com/ABCdef123456"
+
+    GroupPreview:
+      type: object
+      properties:
+        groupJid: { type: string }
+        subject: { type: string, nullable: true }
+        memberCount: { type: integer }
+        size: { type: integer }
+        isBanned: { type: boolean }
+        ownerJid: { type: string, nullable: true }
+        desc: { type: string, nullable: true }
+        announce: { type: boolean }
+        restrict: { type: boolean }
+        inviteCode: { type: string }
+        previewAt: { type: string, format: date-time }
 
     GroupSubjectBody:
       type: object
@@ -2773,6 +2992,27 @@ components:
           enum: [announcement, not_announcement]
           description: announcement=仅管理员发言；not_announcement=允许成员发言
 
+    GroupAnnouncementTextBody:
+      type: object
+      required: [accountId, text]
+      properties:
+        accountId: { type: string }
+        text:
+          type: string
+          maxLength: 512
+          description: 公告文本。协议层实际按群描述更新，富文本模板由功能层保存。
+
+    GroupAnnouncementTextResult:
+      type: object
+      properties:
+        success: { type: boolean }
+        groupJid: { type: string }
+        text: { type: string }
+        appliedAs:
+          type: string
+          enum: [description]
+          description: 当前 WhatsApp Web/Baileys 无独立富文本公告 API，实际应用到群描述
+
     GroupLockedBody:
       type: object
       required: [accountId, mode]
@@ -2803,13 +3043,17 @@ components:
 
     GroupJoinBody:
       type: object
-      required: [accountId, inviteCode]
+      required: [accountId]
       properties:
         accountId: { type: string }
         inviteCode:
           type: string
           description: 邀请 code（不含 https://chat.whatsapp.com/ 前缀）
           example: "ABCdef123456"
+        inviteLink:
+          type: string
+          description: 完整群邀请链接；inviteCode 和 inviteLink 二选一
+          example: "https://chat.whatsapp.com/ABCdef123456"
 
     GroupInviteCodeResult:
       type: object
@@ -2845,6 +3089,39 @@ components:
         warnings:
           type: array
           items: { type: string }
+
+    GroupHealthReport:
+      type: object
+      required: [groupJid, health, checkedAt]
+      properties:
+        accountId:
+          type: string
+          nullable: true
+          description: 可选；不传时 Kafka key 使用 groupJid，避免集中到 system 分区
+        groupJid: { type: string }
+        health:
+          type: string
+          enum: [HEALTHY, RISK, BANNED, FULL, UNKNOWN, ERROR]
+        memberCount: { type: integer, nullable: true }
+        checkedAt: { type: string, format: date-time }
+        errorCode: { type: string, nullable: true }
+        subject: { type: string, nullable: true }
+
+    GroupHealthReportBody:
+      type: object
+      required: [reports]
+      properties:
+        reports:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items: { $ref: '#/components/schemas/GroupHealthReport' }
+
+    GroupHealthReportResult:
+      type: object
+      properties:
+        accepted: { type: integer }
+        rejected: { type: integer }
 
     # ──── 消息通用 ────
     MediaInput:
@@ -3464,6 +3741,83 @@ webhooks:
                 country: { type: string }
                 asn: { type: string }
 
+  account.proxy_changed:
+    post:
+      summary: 代理绑定变化（bind/rebind）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
+                event: { type: string, enum: [account.proxy_changed] }
+                accountId: { type: string }
+                oldProxyId: { type: string, nullable: true }
+                newProxyId: { type: string }
+                oldProxy: { $ref: '#/components/schemas/ProxyBindingResult' }
+                newProxy: { $ref: '#/components/schemas/ProxyBindingResult' }
+                ts: { type: string, format: date-time }
+
+  account.risk_triggered:
+    post:
+      summary: 账号风险触发（功能层暂停任务）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
+                event: { type: string, enum: [account.risk_triggered] }
+                accountId: { type: string }
+                riskLevel:
+                  type: string
+                  enum: [LOW, MEDIUM, HIGH]
+                reasonCode: { $ref: '#/components/schemas/ErrorCode' }
+                source:
+                  type: string
+                  enum: [reachout_timelock, message_cap, protocol, manual, unknown]
+                riskStartTime: { type: string, format: date-time, nullable: true }
+                riskEndTime: { type: string, format: date-time, nullable: true }
+                cooldownUntil: { type: string, format: date-time, nullable: true }
+                detectedAt: { type: string, format: date-time }
+
+  account.banned:
+    post:
+      summary: 账号被封 / 设备移除
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
+                event: { type: string, enum: [account.banned] }
+                accountId: { type: string }
+                reasonCode:
+                  type: string
+                  enum: [BANNED, DEVICE_REMOVED, LOGGED_OUT, UNKNOWN]
+                evidence: { $ref: '#/components/schemas/Evidence' }
+                detectedAt: { type: string, format: date-time }
+
+  account.logout:
+    post:
+      summary: 账号 logout / 远端踢设备
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
+                event: { type: string, enum: [account.logout] }
+                accountId: { type: string }
+                reason:
+                  type: string
+                  enum: [MANUAL, REMOTE, DEVICE_REMOVED, UNKNOWN]
+                ts: { type: string, format: date-time }
+
   pairing.code_generated:
     post:
       summary: pairing code 已生成
@@ -3703,3 +4057,27 @@ webhooks:
                     memberAddMode: { type: string, nullable: true }
                 operator: { type: string }
                 occurredAt: { type: string, format: date-time }
+
+  group.health_reported:
+    post:
+      summary: 群链接健康度回报（由功能层巡检后写回协议事件流）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                eventId: { type: string, description: Kafka envelope id for idempotency }
+                event: { type: string, enum: [group.health_reported] }
+                accountId:
+                  type: string
+                  nullable: true
+                  description: 如果请求未传 accountId，Kafka key 使用 groupJid
+                groupJid: { type: string }
+                health:
+                  type: string
+                  enum: [HEALTHY, RISK, BANNED, FULL, UNKNOWN, ERROR]
+                memberCount: { type: integer, nullable: true }
+                checkedAt: { type: string, format: date-time }
+                errorCode: { type: string, nullable: true }
+                subject: { type: string, nullable: true }

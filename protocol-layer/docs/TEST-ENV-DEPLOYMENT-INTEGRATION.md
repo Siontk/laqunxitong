@@ -342,6 +342,8 @@ LOG_LEVEL=info
 LOG_PRETTY=false
 ```
 
+`MYSQL_ENABLED=false` 只适合短期联调 HTTP/Kafka 流程。关闭 MySQL 时，账号重启恢复、长期 creds 备份、灾备验证不完整；正式测试建议接 AWS RDS MySQL，并且功能层不要读取协议层 MySQL。
+
 启动：
 
 ```bash

@@ -18,18 +18,36 @@ const ProxyShape = z.object({
 export const registerProxyRoutes: RouteRegistrar = (app, ctx) => {
   app.post('/v1/accounts/:accountId/proxy/bind', async (req, reply) => {
     const { accountId } = AccountIdParam.parse(req.params)
+    const previous = await ctx.proxyStore.get(accountId)
     const proxy = ProxyShape.parse(req.body)
     const record = await ctx.proxyStore.bind(accountId, proxy)
+    await ctx.publisher.publish('account.proxy_changed', accountId, {
+      accountId,
+      oldProxyId: previous?.sessionId ?? null,
+      newProxyId: record.sessionId,
+      oldProxy: previous ?? null,
+      newProxy: record,
+      ts: new Date().toISOString()
+    })
     reply.send({ ok: true, accountId, binding: record })
   })
 
   app.post('/v1/accounts/:accountId/proxy/rebind', async (req, reply) => {
     const { accountId } = AccountIdParam.parse(req.params)
+    const previous = await ctx.proxyStore.get(accountId)
     const proxy = ProxyShape.parse(req.body)
     const record = await ctx.proxyStore.bind(accountId, proxy)
     // 触发 worker 重建 socket
     await ctx.accounts.rebindProxy(accountId, proxy).catch(err => {
       ctx.logger.warn({ err, accountId }, 'rebindProxy on worker failed — account may not be online here')
+    })
+    await ctx.publisher.publish('account.proxy_changed', accountId, {
+      accountId,
+      oldProxyId: previous?.sessionId ?? null,
+      newProxyId: record.sessionId,
+      oldProxy: previous ?? null,
+      newProxy: record,
+      ts: new Date().toISOString()
     })
     reply.send({ ok: true, accountId, binding: record })
   })

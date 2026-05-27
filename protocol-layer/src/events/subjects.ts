@@ -13,6 +13,10 @@ export const EVENT_TYPES = [
   'account.type_detected',
   'account.proxy_failed',
   'account.proxy_rotated',
+  'account.proxy_changed',
+  'account.risk_triggered',
+  'account.banned',
+  'account.logout',
   'account.rate_limited',
   'account.restricted',
   'account.new_chat_capping',
@@ -26,6 +30,7 @@ export const EVENT_TYPES = [
   'message.received',
   'message.ack',
   'group.participant_changed',
+  'group.health_reported',
   'group.metadata_updated'
 ] as const
 
@@ -38,6 +43,10 @@ export const CRITICAL_EVENTS = new Set<EventType>([
   'account.restricted',
   'account.new_chat_capping',
   'account.proxy_failed',
+  'account.proxy_changed',
+  'account.risk_triggered',
+  'account.banned',
+  'account.logout',
   'account.owner_assigned',
   'account.owner_changed',
   'account.owner_unassigned',
@@ -47,7 +56,8 @@ export const CRITICAL_EVENTS = new Set<EventType>([
   'pairing.failed',
   'message.received',
   'message.ack',
-  'group.participant_changed'
+  'group.participant_changed',
+  'group.health_reported'
 ])
 
 /** 可降级事件；当前仍写 Kafka，业务侧可按需忽略或降低保留时间 */

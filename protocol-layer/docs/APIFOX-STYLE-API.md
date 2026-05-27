@@ -1334,6 +1334,49 @@ POST /v1/groups/{groupJid}/participants/demote
 GET /v1/groups/{groupJid}/metadata?accountId=acc_001
 ```
 
+**响应关键字段**
+
+```json
+{
+  "id": "120363000000000000@g.us",
+  "subject": "测试群",
+  "size": 10,
+  "isBanned": false,
+  "lastActivityAt": null,
+  "announce": false,
+  "restrict": false
+}
+```
+
+### 8.6.1 解析群链接预览
+
+**用途**：链接入池前解析邀请链接，拿到群 JID、群名、人数和基础健康字段。
+
+```http
+POST /v1/groups/preview
+```
+
+```json
+{
+  "accountId": "acc_001",
+  "inviteLink": "https://chat.whatsapp.com/AbCdEfGhIjK123456"
+}
+```
+
+**响应示例**
+
+```json
+{
+  "groupJid": "120363000000000000@g.us",
+  "subject": "测试群",
+  "memberCount": 128,
+  "isBanned": false,
+  "ownerJid": "8613800000000@s.whatsapp.net",
+  "inviteCode": "AbCdEfGhIjK123456",
+  "previewAt": "2026-05-27T10:00:00.000Z"
+}
+```
+
 ### 8.7 获取群成员
 
 ```http
@@ -1459,7 +1502,7 @@ POST /v1/groups/{groupJid}/invite/revoke
 
 ### 8.14 根据群链接 / code 进群
 
-**用途**：通过群邀请 code 加入群。完整链接取最后一段作为 `inviteCode`。
+**用途**：通过群邀请 code 或完整邀请链接加入群。
 
 ```http
 POST /v1/groups/join
@@ -1471,6 +1514,15 @@ POST /v1/groups/join
 {
   "accountId": "acc_001",
   "inviteCode": "AbCdEfGhIjK123456"
+}
+```
+
+或：
+
+```json
+{
+  "accountId": "acc_001",
+  "inviteLink": "https://chat.whatsapp.com/AbCdEfGhIjK123456"
 }
 ```
 
@@ -1518,6 +1570,32 @@ POST /v1/groups/{groupJid}/settings/announcement
 {
   "accountId": "acc_001",
   "mode": "not_announcement"
+}
+```
+
+### 8.16.1 设置群公告文本
+
+**用途**：写入功能层公告文本对应的群展示内容。当前 WhatsApp Web/Baileys 没有独立富文本公告 API，协议层实际按群描述更新，响应会返回 `appliedAs=description`。
+
+```http
+POST /v1/groups/{groupJid}/announcement-text
+```
+
+```json
+{
+  "accountId": "acc_001",
+  "text": "本群公告：请勿发送无关内容"
+}
+```
+
+**响应示例**
+
+```json
+{
+  "success": true,
+  "groupJid": "120363000000000000@g.us",
+  "text": "本群公告：请勿发送无关内容",
+  "appliedAs": "description"
 }
 ```
 
@@ -1600,6 +1678,40 @@ POST /v1/groups/{groupJid}/pending/reject
   "participants": [
     "8613900000000@s.whatsapp.net"
   ]
+}
+```
+
+### 8.23 群链接健康度回报
+
+**用途**：功能层巡检链接后回报结果。协议层只校验并发布 Kafka `group.health_reported`，不写功能层业务库。
+
+```http
+POST /v1/groups/health-report
+```
+
+```json
+{
+  "reports": [
+    {
+      "accountId": "acc_001",
+      "groupJid": "120363000000000000@g.us",
+      "health": "HEALTHY",
+      "memberCount": 128,
+      "checkedAt": "2026-05-27T10:00:00.000Z",
+      "subject": "测试群"
+    }
+  ]
+}
+```
+
+`health` 可选：`HEALTHY / RISK / BANNED / FULL / UNKNOWN / ERROR`。
+
+**响应示例**
+
+```json
+{
+  "accepted": 1,
+  "rejected": 0
 }
 ```
 

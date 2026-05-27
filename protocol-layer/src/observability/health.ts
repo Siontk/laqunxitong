@@ -2,7 +2,7 @@
  * 健康检查端点。
  *
  * /healthz   liveness  — 进程活着即 200
- * /readyz    readiness — 依赖（Redis / Kafka / PG）就绪才 200
+ * /readyz    readiness — 依赖（Redis / Kafka / MySQL）就绪才 200
  * /livez     存活 + 业务级（worker 心跳 + event loop lag 未爆）
  */
 

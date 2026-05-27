@@ -517,6 +517,28 @@ export interface paths {
         get: operations["getProxy"];
         put?: never;
         post?: never;
+        /** 删除当前代理绑定 */
+        delete: operations["deleteProxy"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/groups/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 解析群邀请链接 / code
+         * @description 链接入池前使用。协议层只解析 WhatsApp invite 信息并返回预览，
+         *     链接池入库、健康度策略仍由功能层负责。
+         */
+        post: operations["groupPreview"];
         delete?: never;
         options?: never;
         head?: never;
@@ -705,6 +727,28 @@ export interface paths {
          * @description Baileys `groupUpdateDescription(jid, desc)`
          */
         post: operations["groupDescription"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/groups/{groupJid}/announcement-text": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 设置群公告文本（协议层按群描述落地）
+         * @description WhatsApp Web / Baileys 当前没有独立“富文本公告”协议 API。
+         *     该接口用于满足功能层公告文本能力，协议层实际调用 `groupUpdateDescription`，
+         *     返回 `appliedAs=description`，功能层如需富文本模板仍应自行存储。
+         */
+        post: operations["groupAnnouncementText"];
         delete?: never;
         options?: never;
         head?: never;
@@ -945,6 +989,27 @@ export interface paths {
          * @description Baileys `groupRequestParticipantsUpdate(jid, p, 'reject')`
          */
         post: operations["groupPendingReject"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/groups/health-report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 批量回报群链接健康度
+         * @description 功能层巡检 GroupLink 后调用。协议层不保存业务库，只校验并发布
+         *     Kafka `group.health_reported` 事件，功能层消费后写自己的 MySQL。
+         */
+        post: operations["groupHealthReport"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2137,6 +2202,178 @@ export interface webhooks {
         patch?: never;
         trace?: never;
     };
+    "account.proxy_changed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 代理绑定变化（bind/rebind） */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
+                        /** @enum {string} */
+                        event?: "account.proxy_changed";
+                        accountId?: string;
+                        oldProxyId?: string | null;
+                        newProxyId?: string;
+                        oldProxy?: components["schemas"]["ProxyBindingResult"];
+                        newProxy?: components["schemas"]["ProxyBindingResult"];
+                        /** Format: date-time */
+                        ts?: string;
+                    };
+                };
+            };
+            responses: never;
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "account.risk_triggered": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 账号风险触发（功能层暂停任务） */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
+                        /** @enum {string} */
+                        event?: "account.risk_triggered";
+                        accountId?: string;
+                        /** @enum {string} */
+                        riskLevel?: "LOW" | "MEDIUM" | "HIGH";
+                        reasonCode?: components["schemas"]["ErrorCode"];
+                        /** @enum {string} */
+                        source?: "reachout_timelock" | "message_cap" | "protocol" | "manual" | "unknown";
+                        /** Format: date-time */
+                        riskStartTime?: string | null;
+                        /** Format: date-time */
+                        riskEndTime?: string | null;
+                        /** Format: date-time */
+                        cooldownUntil?: string | null;
+                        /** Format: date-time */
+                        detectedAt?: string;
+                    };
+                };
+            };
+            responses: never;
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "account.banned": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 账号被封 / 设备移除 */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
+                        /** @enum {string} */
+                        event?: "account.banned";
+                        accountId?: string;
+                        /** @enum {string} */
+                        reasonCode?: "BANNED" | "DEVICE_REMOVED" | "LOGGED_OUT" | "UNKNOWN";
+                        evidence?: components["schemas"]["Evidence"];
+                        /** Format: date-time */
+                        detectedAt?: string;
+                    };
+                };
+            };
+            responses: never;
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "account.logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 账号 logout / 远端踢设备 */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
+                        /** @enum {string} */
+                        event?: "account.logout";
+                        accountId?: string;
+                        /** @enum {string} */
+                        reason?: "MANUAL" | "REMOTE" | "DEVICE_REMOVED" | "UNKNOWN";
+                        /** Format: date-time */
+                        ts?: string;
+                    };
+                };
+            };
+            responses: never;
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "pairing.code_generated": {
         parameters: {
             query?: never;
@@ -2681,6 +2918,51 @@ export interface webhooks {
         patch?: never;
         trace?: never;
     };
+    "group.health_reported": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 群链接健康度回报（由功能层巡检后写回协议事件流） */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        /** @description Kafka envelope id for idempotency */
+                        eventId?: string;
+                        /** @enum {string} */
+                        event?: "group.health_reported";
+                        /** @description 如果请求未传 accountId，Kafka key 使用 groupJid */
+                        accountId?: string | null;
+                        groupJid?: string;
+                        /** @enum {string} */
+                        health?: "HEALTHY" | "RISK" | "BANNED" | "FULL" | "UNKNOWN" | "ERROR";
+                        memberCount?: number | null;
+                        /** Format: date-time */
+                        checkedAt?: string;
+                        errorCode?: string | null;
+                        subject?: string | null;
+                    };
+                };
+            };
+            responses: never;
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export interface components {
     schemas: {
@@ -2734,6 +3016,41 @@ export interface components {
             assigned: boolean;
             /** Format: date-time */
             resolvedAt: string;
+        };
+        /**
+         * @description 状态来源。手动 HTTP 查询/online 通常为 MANUAL_REFRESH，心跳事件为 HEARTBEAT。
+         * @enum {string}
+         */
+        StateSource: "HEARTBEAT" | "MANUAL_REFRESH" | "TASK_REPORT" | "IMPORT" | "PAIRING" | "RECONNECT" | "UNKNOWN";
+        /** @enum {string} */
+        ErrorCode: "OK" | "PRIVACY_BLOCKED" | "TIMEOUT" | "ALREADY_IN" | "GROUP_FULL" | "SERVER_ERROR" | "PROBE_TIMEOUT" | "REACHOUT_TIMELOCK" | "BANNED" | "LOGGED_OUT" | "PROXY_CHANGED" | "UNKNOWN";
+        OnlineResult: {
+            accountId: string;
+            /** @example true */
+            accepted: boolean;
+            stateSource: components["schemas"]["StateSource"];
+            /**
+             * Format: date-time
+             * @description 本次 online 请求被协议层接收并完成本地状态同步的时间
+             */
+            syncedAt: string;
+            routing: components["schemas"]["RoutingInfo"];
+        };
+        ProbeResult: {
+            /** @description true 表示 3 秒内收到 WA ping ack */
+            ok: boolean;
+            /** Format: date-time */
+            ackedAt?: string | null;
+            /** Format: date-time */
+            probedAt: string;
+            /** @description 端到端探测耗时，失败时为 null */
+            latencyMs: number | null;
+            /** @description 兼容旧字段，等同 latencyMs */
+            rttMs?: number | null;
+            reasonCode: components["schemas"]["ErrorCode"];
+            /** @example PROBE_TIMEOUT */
+            code?: string | null;
+            message?: string | null;
         };
         ProxyBinding: {
             /** @enum {string} */
@@ -3046,6 +3363,17 @@ export interface components {
             lid?: string | null;
             /** @enum {string} */
             state: "NEW" | "IMPORTED" | "PAIRING" | "VERIFYING" | "ONLINE" | "STALE" | "OFFLINE" | "RECONNECTING" | "PROXY_FAILED" | "RATE_LIMITED" | "NEED_REAUTH" | "LOGGED_OUT" | "DEVICE_REMOVED";
+            stateSource?: components["schemas"]["StateSource"];
+            /**
+             * Format: date-time
+             * @description 协议层最后一次同步该账号 runtime 状态的时间
+             */
+            lastStateSyncTime?: string;
+            /**
+             * Format: date-time
+             * @description 当前风控/限流冷却结束时间；无冷却时为 null
+             */
+            cooldownUntil?: string | null;
             evidence: components["schemas"]["Evidence"];
             needReauth?: boolean;
             reauthReason?: string | null;
@@ -3077,6 +3405,30 @@ export interface components {
             isActive: boolean;
             /** Format: date-time */
             restrictedUntil?: string | null;
+            /**
+             * Format: date-time
+             * @description 风险开始时间；协议无法从 WA 返回值判定时为 null
+             */
+            riskStartTime?: string | null;
+            /**
+             * Format: date-time
+             * @description 风险结束时间，通常等同 restrictedUntil
+             */
+            riskEndTime?: string | null;
+            /**
+             * Format: date-time
+             * @description 功能层可用的冷却截止时间，通常等同 restrictedUntil
+             */
+            cooldownUntil?: string | null;
+            /** @enum {string} */
+            riskLevel?: "NONE" | "LOW" | "MEDIUM" | "HIGH";
+            /** @enum {string} */
+            source?: "reachout_timelock" | "message_cap" | "protocol" | "manual" | "unknown";
+            /**
+             * Format: date-time
+             * @description 本次协议层检测到风险状态的时间
+             */
+            detectedAt?: string;
             /** @enum {string} */
             enforcementType?: "DEFAULT" | "BIZ_QUALITY" | "WEB_COMPANION_ONLY" | "BIZ_COMMERCE_VIOLATION_ALCOHOL" | "BIZ_COMMERCE_VIOLATION_ADULT" | "BIZ_COMMERCE_VIOLATION_ANIMALS" | "BIZ_COMMERCE_VIOLATION_BODY_PARTS_FLUIDS" | "BIZ_COMMERCE_VIOLATION_DATING" | "BIZ_COMMERCE_VIOLATION_DIGITAL_SERVICES_PRODUCTS" | "BIZ_COMMERCE_VIOLATION_DRUGS" | "BIZ_COMMERCE_VIOLATION_DRUGS_ONLY_OTC" | "BIZ_COMMERCE_VIOLATION_GAMBLING" | "BIZ_COMMERCE_VIOLATION_HEALTHCARE" | "BIZ_COMMERCE_VIOLATION_REAL_FAKE_CURRENCY" | "BIZ_COMMERCE_VIOLATION_SUPPLEMENTS" | "BIZ_COMMERCE_VIOLATION_TOBACCO" | "BIZ_COMMERCE_VIOLATION_VIOLENT_CONTENT" | "BIZ_COMMERCE_VIOLATION_WEAPONS";
             raw?: {
@@ -3136,23 +3488,62 @@ export interface components {
             creation?: number;
             participants?: components["schemas"]["GroupParticipant"][];
             size?: number;
+            /** @description 协议可判定时返回真实值，当前无法判断时默认 false */
+            isBanned?: boolean;
+            /**
+             * Format: date-time
+             * @description 协议可获得最近活跃时间时返回，否则 null
+             */
+            lastActivityAt?: string | null;
             announce?: boolean;
             restrict?: boolean;
         };
         GroupParticipantResults: {
             groupJid?: string;
+            /** @description true 表示至少一个 participant 未成功 */
+            partial?: boolean;
+            /** @description 功能层传入的本次操作超时时间，协议层原样返回便于审计 */
+            timeoutMs?: number;
             results?: {
                 jid?: string;
+                status?: components["schemas"]["ErrorCode"];
                 /**
-                 * @description 200=OK, 403=隐私阻止, 408=超时, 409=已在群, 419=群满, 500=服务端错误
+                 * @description WhatsApp/Baileys 原始状态码，例如 200/403/408/409/419/500
                  * @example 200
                  */
-                status?: string;
+                rawStatus?: string;
             }[];
         };
         ParticipantsActionBody: {
             accountId: string;
             participants: string[];
+            /**
+             * @description 功能层期望的单次群成员操作超时时间，协议层用于请求校验并在响应中回显
+             * @default 30000
+             */
+            timeoutMs: number;
+        };
+        GroupPreviewBody: {
+            accountId: string;
+            /**
+             * @description 可传完整 `https://chat.whatsapp.com/...` 链接，也可直接传 invite code
+             * @example https://chat.whatsapp.com/ABCdef123456
+             */
+            inviteLink: string;
+        };
+        GroupPreview: {
+            groupJid?: string;
+            subject?: string | null;
+            memberCount?: number;
+            size?: number;
+            isBanned?: boolean;
+            ownerJid?: string | null;
+            desc?: string | null;
+            announce?: boolean;
+            restrict?: boolean;
+            inviteCode?: string;
+            /** Format: date-time */
+            previewAt?: string;
         };
         GroupSubjectBody: {
             accountId: string;
@@ -3174,6 +3565,21 @@ export interface components {
              * @enum {string}
              */
             mode: "announcement" | "not_announcement";
+        };
+        GroupAnnouncementTextBody: {
+            accountId: string;
+            /** @description 公告文本。协议层实际按群描述更新，富文本模板由功能层保存。 */
+            text: string;
+        };
+        GroupAnnouncementTextResult: {
+            success?: boolean;
+            groupJid?: string;
+            text?: string;
+            /**
+             * @description 当前 WhatsApp Web/Baileys 无独立富文本公告 API，实际应用到群描述
+             * @enum {string}
+             */
+            appliedAs?: "description";
         };
         GroupLockedBody: {
             accountId: string;
@@ -3199,7 +3605,12 @@ export interface components {
              * @description 邀请 code（不含 https://chat.whatsapp.com/ 前缀）
              * @example ABCdef123456
              */
-            inviteCode: string;
+            inviteCode?: string;
+            /**
+             * @description 完整群邀请链接；inviteCode 和 inviteLink 二选一
+             * @example https://chat.whatsapp.com/ABCdef123456
+             */
+            inviteLink?: string;
         };
         GroupInviteCodeResult: {
             groupJid?: string;
@@ -3225,6 +3636,25 @@ export interface components {
             success?: boolean;
             groupJid?: string | null;
             warnings?: string[];
+        };
+        GroupHealthReport: {
+            /** @description 可选；不传时 Kafka key 使用 groupJid，避免集中到 system 分区 */
+            accountId?: string | null;
+            groupJid: string;
+            /** @enum {string} */
+            health: "HEALTHY" | "RISK" | "BANNED" | "FULL" | "UNKNOWN" | "ERROR";
+            memberCount?: number | null;
+            /** Format: date-time */
+            checkedAt: string;
+            errorCode?: string | null;
+            subject?: string | null;
+        };
+        GroupHealthReportBody: {
+            reports: components["schemas"]["GroupHealthReport"][];
+        };
+        GroupHealthReportResult: {
+            accepted?: number;
+            rejected?: number;
         };
         /** @description 媒体输入。当前协议层支持 URL 或 base64；生产建议功能层传对象存储 URL。 */
         MediaInput: {
@@ -3884,7 +4314,9 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["OnlineResult"];
+                };
             };
         };
     };
@@ -4099,11 +4531,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        /** Format: date-time */
-                        ackedAt?: string;
-                        rttMs?: number;
-                    };
+                    "application/json": components["schemas"]["ProbeResult"];
                 };
             };
             /** @description 3s 内未收到 ack */
@@ -4112,7 +4540,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["ProbeResult"];
                 };
             };
         };
@@ -4292,6 +4720,56 @@ export interface operations {
             };
         };
     };
+    deleteProxy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @example acc_001 */
+                accountId: components["parameters"]["AccountIdPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已删除 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @example true */
+                        ok?: boolean;
+                    };
+                };
+            };
+        };
+    };
+    groupPreview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupPreviewBody"];
+            };
+        };
+        responses: {
+            /** @description 群邀请预览 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupPreview"];
+                };
+            };
+        };
+    };
     groupCreate: {
         parameters: {
             query?: never;
@@ -4335,10 +4813,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": {
-                    accountId: string;
-                    participants: string[];
-                };
+                "application/json": components["schemas"]["ParticipantsActionBody"];
             };
         };
         responses: {
@@ -4569,6 +5044,33 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GroupOperationResult"];
+                };
+            };
+        };
+    };
+    groupAnnouncementText: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @example 120363424367770097@g.us */
+                groupJid: components["parameters"]["GroupJidPath"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupAnnouncementTextBody"];
+            };
+        };
+        responses: {
+            /** @description ok */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupAnnouncementTextResult"];
                 };
             };
         };
@@ -4905,6 +5407,30 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GroupParticipantResults"];
+                };
+            };
+        };
+    };
+    groupHealthReport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupHealthReportBody"];
+            };
+        };
+        responses: {
+            /** @description 已接收 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupHealthReportResult"];
                 };
             };
         };

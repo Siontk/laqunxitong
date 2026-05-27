@@ -35,16 +35,24 @@ export const registerStatusRoutes: RouteRegistrar = (app, ctx) => {
       // released slots are tracked by runtimeStore only
     }
     if (!state) return reply.code(404).send({ code: 'ACCOUNT_NOT_FOUND', message: `account ${accountId} not found` })
+    const reportedAt = new Date().toISOString()
+    const lastStateSyncTime =
+      typeof evidence === 'object' && evidence && 'updatedAt' in evidence
+        ? String((evidence as { updatedAt?: unknown }).updatedAt ?? reportedAt)
+        : runtime?.updatedAt ?? reportedAt
     reply.send({
       accountId,
       state,
+      stateSource: 'MANUAL_REFRESH',
+      lastStateSyncTime,
+      cooldownUntil: null,
       evidence,
       business: detection,
       deviceProfile,
       browserDisplay,
       accountType: detection?.accountType ?? 'UNKNOWN',
       workerId: ctx.config.workerId,
-      reportedAt: new Date().toISOString()
+      reportedAt
     })
   })
 
@@ -105,11 +113,12 @@ export const registerStatusRoutes: RouteRegistrar = (app, ctx) => {
 
   app.post('/v1/accounts/:accountId/probe', async (req, reply) => {
     const { accountId } = AccountIdParam.parse(req.params)
+    const probedAt = new Date().toISOString()
     try {
       const r = await ctx.accounts.probe(accountId, 3000)
-      reply.send({ ackedAt: new Date().toISOString(), rttMs: r.rttMs })
+      reply.send({ ok: true, ackedAt: new Date().toISOString(), probedAt, latencyMs: r.rttMs, rttMs: r.rttMs, reasonCode: 'OK' })
     } catch (err) {
-      reply.code(503).send({ code: 'PROBE_TIMEOUT', message: (err as Error).message })
+      reply.code(503).send({ ok: false, code: 'PROBE_TIMEOUT', message: (err as Error).message, probedAt, latencyMs: null, reasonCode: 'TIMEOUT' })
     }
   })
 

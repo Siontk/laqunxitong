@@ -4,7 +4,7 @@
  * 设计原因（§ 11.3.3）：
  *   - 每条消息可能触发 sender-key / receiver-key / pre-key 多次写
  *   - 写放大极高（百万级账号 → 千亿次/天）
- *   - PG 撑不住，必须 Redis cluster 分片承担
+ *   - 高频 keys 写不适合走 L3 关系库，必须 Redis cluster 分片承担
  *   - 周期 snapshot 到对象存储作为冷备，崩溃时从 snapshot + 最近 N 分钟 Redis 重建
  *
  * Key 格式：
