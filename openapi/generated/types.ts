@@ -988,7 +988,8 @@ export interface paths {
         put?: never;
         /**
          * 批准入群申请
-         * @description Baileys `groupRequestParticipantsUpdate(jid, p, 'approve')`
+         * @description Baileys `groupRequestParticipantsUpdate(jid, p, 'approve')`。
+         *     超时与 `partial` 回执语义同 [`groupParticipantAdd`](#operation/groupParticipantAdd)。
          */
         post: operations["groupPendingApprove"];
         delete?: never;
@@ -1008,7 +1009,8 @@ export interface paths {
         put?: never;
         /**
          * 拒绝入群申请
-         * @description Baileys `groupRequestParticipantsUpdate(jid, p, 'reject')`
+         * @description Baileys `groupRequestParticipantsUpdate(jid, p, 'reject')`。
+         *     超时与 `partial` 回执语义同 [`groupParticipantAdd`](#operation/groupParticipantAdd)。
          */
         post: operations["groupPendingReject"];
         delete?: never;

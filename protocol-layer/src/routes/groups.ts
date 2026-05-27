@@ -38,7 +38,8 @@ function participantCode(status: string | number | undefined): string {
 function normalizeParticipantResults(
   groupJid: string,
   results: Array<Record<string, unknown>>,
-  timeoutMs?: number
+  timeoutMs: number | undefined,
+  expectedCount: number
 ): { groupJid: string; partial: boolean; timeoutMs?: number; results: Array<Record<string, unknown>> } {
   const normalized = results.map(r => {
     const rawStatus = String(r.status ?? '500')
@@ -50,10 +51,30 @@ function normalizeParticipantResults(
   })
   return {
     groupJid,
-    partial: normalized.some(r => r.status !== 'OK'),
+    partial: normalized.length < expectedCount,
     timeoutMs,
     results: normalized
   }
+}
+
+async function withParticipantTimeout(
+  action: Promise<Array<Record<string, unknown>>>,
+  timeoutMs: number
+): Promise<{ timedOut: boolean; results: Array<Record<string, unknown>> }> {
+  let timer: NodeJS.Timeout | null = null
+  const timeout = new Promise<'timeout'>(resolve => {
+    timer = setTimeout(() => resolve('timeout'), timeoutMs)
+    timer.unref?.()
+  })
+  const result = await Promise.race([action, timeout])
+  if (timer) clearTimeout(timer)
+  if (result === 'timeout') {
+    action.catch(() => {
+      // the route already returned partial=true; any late failure is not actionable here
+    })
+    return { timedOut: true, results: [] }
+  }
+  return { timedOut: false, results: result }
 }
 
 function auditParticipantAction(
@@ -81,7 +102,12 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     try {
       const created = await sock.groupCreate(subject, participants)
       ctx.metrics.groupCreateTotal.inc({ result: 'success' })
-      const results = normalizeParticipantResults(created.id, created.participants?.map(p => ({ jid: p.id, status: '200' })) ?? [])
+      const results = normalizeParticipantResults(
+        created.id,
+        created.participants?.map(p => ({ jid: p.id, status: '200' })) ?? [],
+        undefined,
+        participants.length
+      )
       auditParticipantAction(ctx, 'group.create', accountId, created.id, results)
       reply.send({
         groupJid: created.id,
@@ -97,9 +123,12 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
-    const r = await sock.groupParticipantsUpdate(groupJid, participants, 'add')
-    for (const p of r) ctx.metrics.groupAddParticipantsTotal.inc({ result: p.status })
-    const results = normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs)
+    const r = await withParticipantTimeout(
+      sock.groupParticipantsUpdate(groupJid, participants, 'add') as unknown as Promise<Array<Record<string, unknown>>>,
+      timeoutMs
+    )
+    for (const p of r.results) ctx.metrics.groupAddParticipantsTotal.inc({ result: String(p.status ?? 'unknown') })
+    const results = normalizeParticipantResults(groupJid, r.results, timeoutMs, participants.length)
     auditParticipantAction(ctx, 'group.participants.add', accountId, groupJid, results)
     reply.send(results)
   })
@@ -108,8 +137,11 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
-    const r = await sock.groupParticipantsUpdate(groupJid, participants, 'remove')
-    const results = normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs)
+    const r = await withParticipantTimeout(
+      sock.groupParticipantsUpdate(groupJid, participants, 'remove') as unknown as Promise<Array<Record<string, unknown>>>,
+      timeoutMs
+    )
+    const results = normalizeParticipantResults(groupJid, r.results, timeoutMs, participants.length)
     auditParticipantAction(ctx, 'group.participants.remove', accountId, groupJid, results)
     reply.send(results)
   })
@@ -118,8 +150,11 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
-    const r = await sock.groupParticipantsUpdate(groupJid, participants, 'promote')
-    const results = normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs)
+    const r = await withParticipantTimeout(
+      sock.groupParticipantsUpdate(groupJid, participants, 'promote') as unknown as Promise<Array<Record<string, unknown>>>,
+      timeoutMs
+    )
+    const results = normalizeParticipantResults(groupJid, r.results, timeoutMs, participants.length)
     auditParticipantAction(ctx, 'group.participants.promote', accountId, groupJid, results)
     reply.send(results)
   })
@@ -128,8 +163,11 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
-    const r = await sock.groupParticipantsUpdate(groupJid, participants, 'demote')
-    const results = normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs)
+    const r = await withParticipantTimeout(
+      sock.groupParticipantsUpdate(groupJid, participants, 'demote') as unknown as Promise<Array<Record<string, unknown>>>,
+      timeoutMs
+    )
+    const results = normalizeParticipantResults(groupJid, r.results, timeoutMs, participants.length)
     auditParticipantAction(ctx, 'group.participants.demote', accountId, groupJid, results)
     reply.send(results)
   })
@@ -347,8 +385,11 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
-    const r = await sock.groupRequestParticipantsUpdate(groupJid, participants, 'approve')
-    const results = normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs)
+    const r = await withParticipantTimeout(
+      sock.groupRequestParticipantsUpdate(groupJid, participants, 'approve') as unknown as Promise<Array<Record<string, unknown>>>,
+      timeoutMs
+    )
+    const results = normalizeParticipantResults(groupJid, r.results, timeoutMs, participants.length)
     auditParticipantAction(ctx, 'group.pending.approve', accountId, groupJid, results)
     reply.send(results)
   })
@@ -357,8 +398,11 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
-    const r = await sock.groupRequestParticipantsUpdate(groupJid, participants, 'reject')
-    const results = normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs)
+    const r = await withParticipantTimeout(
+      sock.groupRequestParticipantsUpdate(groupJid, participants, 'reject') as unknown as Promise<Array<Record<string, unknown>>>,
+      timeoutMs
+    )
+    const results = normalizeParticipantResults(groupJid, r.results, timeoutMs, participants.length)
     auditParticipantAction(ctx, 'group.pending.reject', accountId, groupJid, results)
     reply.send(results)
   })
