@@ -571,7 +571,26 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 拉人进群（核心接口） */
+        /**
+         * 拉人进群（核心接口）
+         * @description ### 超时与部分回执（partial）语义
+         *
+         *     功能层通过 `ParticipantsActionBody.timeoutMs` 指定本次操作的 SLA（1~120000ms，默认 30000）。
+         *     协议层在 `timeoutMs` 到期或所有 participant 都拿到 WA 服务端 ack（以先到为准）时返回。
+         *
+         *     响应 **始终返回 200**，即使超时也走 200。失败语义通过 `GroupParticipantResults` 的字段表达：
+         *
+         *     - `partial=true`：至少一个 participant 未能在 timeout 内拿到结果。功能层应：
+         *       - 信任 `results[*]` 已含的逐条结果（不要重复对这些 jid 重试）；
+         *       - 对**未出现在 results 中的 participant**自行重试（建议指数退避，避免协议层并发风暴）。
+         *     - `partial=false`：本批所有 participant 的结果均已收齐，`results` 长度 == 请求 `participants` 长度。
+         *     - `timeoutMs` 字段回显功能层传入值，便于审计与告警阈值比对。
+         *
+         *     ### 错误码
+         *
+         *     单条结果的 `results[].status` 取值见 `ErrorCode` 枚举；`rawStatus` 为 WA 原始数字码（200/403/408/409/419/500）。
+         *     端点级 4xx/5xx 仅在请求非法或协议层自身故障时返回，业务失败（隐私阻止/群满/已在群等）均在 200 + ErrorCode 内表达。
+         */
         post: operations["groupParticipantAdd"];
         delete?: never;
         options?: never;
@@ -624,7 +643,8 @@ export interface paths {
         put?: never;
         /**
          * 移除群成员
-         * @description Baileys `groupParticipantsUpdate(jid, p, 'remove')`
+         * @description Baileys `groupParticipantsUpdate(jid, p, 'remove')`。
+         *     超时与 `partial` 回执语义同 [`groupParticipantAdd`](#operation/groupParticipantAdd)。
          */
         post: operations["groupParticipantRemove"];
         delete?: never;
@@ -644,7 +664,8 @@ export interface paths {
         put?: never;
         /**
          * 设为管理员
-         * @description Baileys `groupParticipantsUpdate(jid, p, 'promote')`
+         * @description Baileys `groupParticipantsUpdate(jid, p, 'promote')`。
+         *     超时与 `partial` 回执语义同 [`groupParticipantAdd`](#operation/groupParticipantAdd)。
          */
         post: operations["groupParticipantPromote"];
         delete?: never;
@@ -664,7 +685,8 @@ export interface paths {
         put?: never;
         /**
          * 取消管理员
-         * @description Baileys `groupParticipantsUpdate(jid, p, 'demote')`
+         * @description Baileys `groupParticipantsUpdate(jid, p, 'demote')`。
+         *     超时与 `partial` 回执语义同 [`groupParticipantAdd`](#operation/groupParticipantAdd)。
          */
         post: operations["groupParticipantDemote"];
         delete?: never;
@@ -4817,7 +4839,10 @@ export interface operations {
             };
         };
         responses: {
-            /** @description 每个成员的结果 */
+            /**
+             * @description 批量操作结果。注意 `partial=true` 时 `results` 可能短于请求列表，
+             *     短缺的 participant 视为"未知"由功能层自行重试。
+             */
             200: {
                 headers: {
                     [name: string]: unknown;
