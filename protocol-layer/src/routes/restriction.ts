@@ -5,6 +5,7 @@
 import { z } from 'zod'
 
 import type { RouteRegistrar } from './_context.js'
+import { auditInfo } from './audit-log.js'
 
 const AccountIdParam = z.object({ accountId: z.string() })
 
@@ -19,6 +20,13 @@ export const registerRestrictionRoutes: RouteRegistrar = (app, ctx) => {
     const restrictedUntil = r.timeEnforcementEnds?.toISOString() ?? null
     const riskLevel = r.isActive ? 'HIGH' : 'NONE'
     const fetchedAt = new Date().toISOString()
+    auditInfo(ctx.logger, 'account.restriction', {
+      accountId,
+      isActive: !!r.isActive,
+      restrictedUntil,
+      riskLevel,
+      enforcementType: r.enforcementType ?? 'DEFAULT'
+    })
     reply.send({
       accountId,
       isActive: !!r.isActive,
@@ -41,11 +49,19 @@ export const registerRestrictionRoutes: RouteRegistrar = (app, ctx) => {
     const r = await sock.fetchNewChatMessageCap()
     const used = r?.used_quota ?? 0
     const total = r?.total_quota ?? 0
+    const remaining = Math.max(0, total - used)
+    auditInfo(ctx.logger, 'account.message_cap', {
+      accountId,
+      totalQuota: total,
+      usedQuota: used,
+      remaining,
+      cappingStatus: r?.capping_status ?? 'NONE'
+    })
     reply.send({
       accountId,
       totalQuota: total,
       usedQuota: used,
-      remaining: Math.max(0, total - used),
+      remaining,
       cycleStart: r?.cycle_start_timestamp ?? null,
       cycleEnd: r?.cycle_end_timestamp ?? null,
       cappingStatus: r?.capping_status ?? 'NONE',
@@ -104,6 +120,14 @@ export const registerRestrictionRoutes: RouteRegistrar = (app, ctx) => {
     }
 
     const canSendNewChat = isOnline && !restrictedActive && !capped
+    auditInfo(ctx.logger, 'account.usability', {
+      accountId,
+      state,
+      canSendText: isOnline && !restrictedActive,
+      canSendNewChat,
+      blockedReason,
+      blockedUntil
+    })
     reply.send({
       accountId,
       state,

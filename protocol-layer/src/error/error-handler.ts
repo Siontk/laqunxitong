@@ -81,6 +81,10 @@ export function registerErrorHandler(app: FastifyInstance, logger: Logger): void
     (err: FastifyError | ZodError | ProtocolError | Error, req: FastifyRequest, reply: FastifyReply) => {
       // zod 验证
       if (err instanceof ZodError) {
+        logger.warn(
+          { audit: true, action: 'http.validation_error', path: req.url, method: req.method, requestId: req.id },
+          'business audit'
+        )
         reply.code(400).send({
           code: 'VALIDATION_ERROR',
           message: 'request body validation failed',
@@ -91,6 +95,19 @@ export function registerErrorHandler(app: FastifyInstance, logger: Logger): void
 
       // 协议层显式错误
       if (err instanceof ProtocolError) {
+        logger.warn(
+          {
+            audit: true,
+            action: 'http.protocol_error',
+            code: err.code,
+            statusCode: err.httpStatus,
+            details: err.details,
+            path: req.url,
+            method: req.method,
+            requestId: req.id
+          },
+          'business audit'
+        )
         reply.code(err.httpStatus).send({
           code: err.code,
           message: err.message,
@@ -102,6 +119,18 @@ export function registerErrorHandler(app: FastifyInstance, logger: Logger): void
       // fastify 内置
       if ('statusCode' in err && typeof (err as FastifyError).statusCode === 'number') {
         const fe = err as FastifyError
+        logger.warn(
+          {
+            audit: true,
+            action: 'http.fastify_error',
+            code: fe.code ?? 'FASTIFY_ERROR',
+            statusCode: fe.statusCode ?? 500,
+            path: req.url,
+            method: req.method,
+            requestId: req.id
+          },
+          'business audit'
+        )
         reply.code(fe.statusCode ?? 500).send({
           code: fe.code ?? 'FASTIFY_ERROR',
           message: fe.message

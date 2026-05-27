@@ -5,6 +5,7 @@
 import { z } from 'zod'
 
 import type { RouteRegistrar } from './_context.js'
+import { auditInfo, auditWarn } from './audit-log.js'
 import { NotOwnerError } from '../error/error-handler.js'
 import type { AccountDeviceProfile, BrowserDisplay, BrowserDisplayPlatform, DevicePlatform } from '../store/account-device-store.js'
 import { browserFromDisplay } from '../worker/socket-browser.js'
@@ -67,6 +68,7 @@ export const registerLifecycleRoutes: RouteRegistrar = (app, ctx) => {
     if (!proxy) {
       const stored = await ctx.proxyStore.get(accountId)
       if (!stored) {
+        auditWarn(ctx.logger, 'account.online.rejected', { accountId, reason: 'PROXY_REQUIRED' })
         return reply.code(400).send({
           code: 'PROXY_REQUIRED',
           message: 'proxy binding missing — call /proxy/bind first or include in body'
@@ -84,6 +86,15 @@ export const registerLifecycleRoutes: RouteRegistrar = (app, ctx) => {
       undefined,
       browserDisplay ? browserFromDisplay(browserDisplay, ctx.config) : undefined
     )
+    auditInfo(ctx.logger, 'account.online.accepted', {
+      accountId,
+      ownerWorkerId: decision.workerId,
+      ownerEndpoint: owner.worker?.endpoint ?? null,
+      proxySessionId: proxy.sessionId,
+      proxyCountry: proxy.country,
+      browserName: browserDisplay?.browserName ?? null,
+      browserPlatform: browserDisplay?.platform ?? null
+    })
     reply.code(202).send({
       accountId,
       accepted: true,
@@ -101,6 +112,7 @@ export const registerLifecycleRoutes: RouteRegistrar = (app, ctx) => {
   app.post('/v1/accounts/:accountId/offline', async (req, reply) => {
     const { accountId } = AccountIdParam.parse(req.params)
     await ctx.accounts.offline(accountId)
+    auditInfo(ctx.logger, 'account.offline', { accountId, reason: 'manual' })
     reply.send({ ok: true })
   })
 
@@ -112,6 +124,7 @@ export const registerLifecycleRoutes: RouteRegistrar = (app, ctx) => {
       reason: 'MANUAL',
       ts: new Date().toISOString()
     })
+    auditInfo(ctx.logger, 'account.logout', { accountId, reason: 'MANUAL' })
     reply.send({ ok: true })
   })
 }

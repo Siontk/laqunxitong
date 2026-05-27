@@ -514,6 +514,19 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
       this.deps.metrics.accountsByState.inc({ state: target })
       this.deps.metrics.accountsByState.dec({ state: fromState })
       this.deps.metrics.accountsTotal.set(this.activeSize())
+      this.logger.info(
+        {
+          audit: true,
+          action: 'account.state_changed',
+          accountId: ctx.accountId,
+          from: fromState,
+          to: target,
+          reason,
+          semantic: detail?.semantic ?? null,
+          rawCode: detail?.rawCode ?? null
+        },
+        'business audit'
+      )
       this.deps.publisher.publish('account.state_changed', ctx.accountId, t, this.getEvidence(ctx.accountId))
     } catch (err) {
       this.logger.warn({ err, accountId: ctx.accountId, from: fromState, to: target }, 'invalid state transition')

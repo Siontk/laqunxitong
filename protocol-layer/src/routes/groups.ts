@@ -5,6 +5,7 @@
 import { z } from 'zod'
 
 import type { RouteRegistrar } from './_context.js'
+import { auditInfo, summarizeParticipantResults } from './audit-log.js'
 
 const GroupJidParam = z.object({ groupJid: z.string() })
 const AccountIdParam = z.object({ accountId: z.string() })
@@ -55,6 +56,22 @@ function normalizeParticipantResults(
   }
 }
 
+function auditParticipantAction(
+  ctx: Parameters<RouteRegistrar>[1],
+  action: string,
+  accountId: string,
+  groupJid: string,
+  results: ReturnType<typeof normalizeParticipantResults>
+): void {
+  auditInfo(ctx.logger, action, {
+    accountId,
+    groupJid,
+    partial: results.partial,
+    timeoutMs: results.timeoutMs,
+    ...summarizeParticipantResults(results.results)
+  })
+}
+
 export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
   // ─── 创建 / 拉人 / 移除 / 升降级 ───
   app.post('/v1/groups/create', async (req, reply) => {
@@ -64,9 +81,11 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     try {
       const created = await sock.groupCreate(subject, participants)
       ctx.metrics.groupCreateTotal.inc({ result: 'success' })
+      const results = normalizeParticipantResults(created.id, created.participants?.map(p => ({ jid: p.id, status: '200' })) ?? [])
+      auditParticipantAction(ctx, 'group.create', accountId, created.id, results)
       reply.send({
         groupJid: created.id,
-        results: normalizeParticipantResults(created.id, created.participants?.map(p => ({ jid: p.id, status: '200' })) ?? [])
+        results
       })
     } catch (err) {
       ctx.metrics.groupCreateTotal.inc({ result: 'error' })
@@ -80,7 +99,9 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const sock = ctx.accounts.getSocket(accountId)
     const r = await sock.groupParticipantsUpdate(groupJid, participants, 'add')
     for (const p of r) ctx.metrics.groupAddParticipantsTotal.inc({ result: p.status })
-    reply.send(normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs))
+    const results = normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs)
+    auditParticipantAction(ctx, 'group.participants.add', accountId, groupJid, results)
+    reply.send(results)
   })
 
   app.post('/v1/groups/:groupJid/participants/remove', async (req, reply) => {
@@ -88,7 +109,9 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
     const r = await sock.groupParticipantsUpdate(groupJid, participants, 'remove')
-    reply.send(normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs))
+    const results = normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs)
+    auditParticipantAction(ctx, 'group.participants.remove', accountId, groupJid, results)
+    reply.send(results)
   })
 
   app.post('/v1/groups/:groupJid/participants/promote', async (req, reply) => {
@@ -96,7 +119,9 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
     const r = await sock.groupParticipantsUpdate(groupJid, participants, 'promote')
-    reply.send(normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs))
+    const results = normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs)
+    auditParticipantAction(ctx, 'group.participants.promote', accountId, groupJid, results)
+    reply.send(results)
   })
 
   app.post('/v1/groups/:groupJid/participants/demote', async (req, reply) => {
@@ -104,7 +129,9 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
     const r = await sock.groupParticipantsUpdate(groupJid, participants, 'demote')
-    reply.send(normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs))
+    const results = normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs)
+    auditParticipantAction(ctx, 'group.participants.demote', accountId, groupJid, results)
+    reply.send(results)
   })
 
   app.post('/v1/groups/preview', async (req, reply) => {
@@ -113,6 +140,12 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const sock = ctx.accounts.getSocket(accountId)
     const meta = await sock.groupGetInviteInfo(inviteCode)
     const memberCount = meta.participants?.length ?? meta.size ?? 0
+    auditInfo(ctx.logger, 'group.preview', {
+      accountId,
+      groupJid: meta.id,
+      memberCount,
+      inviteCodeSuffix: inviteCode.slice(-6)
+    })
     reply.send({
       groupJid: meta.id,
       subject: meta.subject ?? null,
@@ -134,6 +167,13 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { accountId } = z.object({ accountId: z.string() }).parse(req.query)
     const sock = ctx.accounts.getSocket(accountId)
     const meta = await sock.groupMetadata(groupJid)
+    auditInfo(ctx.logger, 'group.metadata', {
+      accountId,
+      groupJid,
+      size: meta.participants?.length ?? 0,
+      announce: !!meta.announce,
+      restrict: !!meta.restrict
+    })
     reply.send({
       ...meta,
       size: meta.participants?.length ?? 0,
@@ -147,6 +187,7 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { accountId } = z.object({ accountId: z.string() }).parse(req.query)
     const sock = ctx.accounts.getSocket(accountId)
     const meta = await sock.groupMetadata(groupJid)
+    auditInfo(ctx.logger, 'group.participants.list', { accountId, groupJid, count: meta.participants.length })
     reply.send(meta.participants)
   })
 
@@ -163,6 +204,7 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
       announce: !!g.announce,
       creation: g.creation
     }))
+    auditInfo(ctx.logger, 'group.list', { accountId, total: list.length })
     reply.send({ total: list.length, groups: list })
   })
 
@@ -172,6 +214,7 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { accountId, subject } = z.object({ accountId: z.string(), subject: z.string().max(100) }).parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
     await sock.groupUpdateSubject(groupJid, subject)
+    auditInfo(ctx.logger, 'group.subject.update', { accountId, groupJid })
     reply.send({ success: true, groupJid })
   })
 
@@ -180,6 +223,7 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { accountId, description } = z.object({ accountId: z.string(), description: z.string().nullable() }).parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
     await sock.groupUpdateDescription(groupJid, description ?? undefined)
+    auditInfo(ctx.logger, 'group.description.update', { accountId, groupJid, cleared: description === null })
     reply.send({ success: true, groupJid })
   })
 
@@ -194,6 +238,7 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
       operator: sock.user?.id ?? 'self',
       occurredAt: new Date().toISOString()
     })
+    auditInfo(ctx.logger, 'group.announcement_text.update', { accountId, groupJid, appliedAs: 'description' })
     reply.send({ success: true, groupJid, text, appliedAs: 'description' })
   })
 
@@ -203,6 +248,7 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const sock = ctx.accounts.getSocket(accountId)
     const buf = image.base64 ? Buffer.from(image.base64, 'base64') : { url: image.url! }
     await sock.updateProfilePicture(groupJid, buf as never)
+    auditInfo(ctx.logger, 'group.picture.update', { accountId, groupJid, input: image.base64 ? 'base64' : 'url' })
     reply.send({ success: true })
   })
 
@@ -211,7 +257,8 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId } = z.object({ accountId: z.string() }).parse(req.query)
     const sock = ctx.accounts.getSocket(accountId)
-    const code = await sock.groupInviteCode(groupJid)
+    const code = (await sock.groupInviteCode(groupJid)) ?? ''
+    auditInfo(ctx.logger, 'group.invite_code.get', { accountId, groupJid, inviteCodeSuffix: code.slice(-6) })
     reply.send({ groupJid, inviteCode: code, inviteUrl: `https://chat.whatsapp.com/${code}` })
   })
 
@@ -219,7 +266,8 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { groupJid } = GroupJidParam.parse(req.params)
     const { accountId } = AccountIdBody.parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
-    const code = await sock.groupRevokeInvite(groupJid)
+    const code = (await sock.groupRevokeInvite(groupJid)) ?? ''
+    auditInfo(ctx.logger, 'group.invite_code.revoke', { accountId, groupJid, inviteCodeSuffix: code.slice(-6) })
     reply.send({ groupJid, inviteCode: code, inviteUrl: `https://chat.whatsapp.com/${code}` })
   })
 
@@ -232,6 +280,7 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const sock = ctx.accounts.getSocket(accountId)
     const code = inviteCode ?? inviteCodeFrom(inviteLink!)
     const groupJid = await sock.groupAcceptInvite(code)
+    auditInfo(ctx.logger, 'group.join', { accountId, groupJid, inviteCodeSuffix: code.slice(-6), joined: !!groupJid })
     reply.send({ groupJid, joined: !!groupJid })
   })
 
@@ -240,6 +289,7 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { accountId } = AccountIdBody.parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
     await sock.groupLeave(groupJid)
+    auditInfo(ctx.logger, 'group.leave', { accountId, groupJid })
     reply.send({ success: true, groupJid })
   })
 
@@ -249,6 +299,7 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { accountId, mode } = z.object({ accountId: z.string(), mode: z.enum(['announcement', 'not_announcement']) }).parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
     await sock.groupSettingUpdate(groupJid, mode)
+    auditInfo(ctx.logger, 'group.settings.announcement', { accountId, groupJid, mode })
     reply.send({ success: true })
   })
 
@@ -257,6 +308,7 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { accountId, mode } = z.object({ accountId: z.string(), mode: z.enum(['locked', 'unlocked']) }).parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
     await sock.groupSettingUpdate(groupJid, mode)
+    auditInfo(ctx.logger, 'group.settings.locked', { accountId, groupJid, mode })
     reply.send({ success: true })
   })
 
@@ -265,6 +317,7 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { accountId, mode } = z.object({ accountId: z.string(), mode: z.enum(['admin_add', 'all_member_add']) }).parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
     await sock.groupMemberAddMode(groupJid, mode)
+    auditInfo(ctx.logger, 'group.settings.member_add_mode', { accountId, groupJid, mode })
     reply.send({ success: true })
   })
 
@@ -273,6 +326,7 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { accountId, mode } = z.object({ accountId: z.string(), mode: z.enum(['on', 'off']) }).parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
     await sock.groupJoinApprovalMode(groupJid, mode)
+    auditInfo(ctx.logger, 'group.settings.join_approval', { accountId, groupJid, mode })
     reply.send({ success: true })
   })
 
@@ -282,6 +336,7 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { accountId } = z.object({ accountId: z.string() }).parse(req.query)
     const sock = ctx.accounts.getSocket(accountId)
     const list = await sock.groupRequestParticipantsList(groupJid)
+    auditInfo(ctx.logger, 'group.pending.list', { accountId, groupJid, total: list.length })
     reply.send({
       total: list.length,
       pending: list.map(p => ({ jid: p.jid, requestedAt: Number(p.request_time ?? Date.now() / 1000) }))
@@ -293,7 +348,9 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
     const r = await sock.groupRequestParticipantsUpdate(groupJid, participants, 'approve')
-    reply.send(normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs))
+    const results = normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs)
+    auditParticipantAction(ctx, 'group.pending.approve', accountId, groupJid, results)
+    reply.send(results)
   })
 
   app.post('/v1/groups/:groupJid/pending/reject', async (req, reply) => {
@@ -301,7 +358,9 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     const { accountId, participants, timeoutMs } = ParticipantsBody.parse(req.body)
     const sock = ctx.accounts.getSocket(accountId)
     const r = await sock.groupRequestParticipantsUpdate(groupJid, participants, 'reject')
-    reply.send(normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs))
+    const results = normalizeParticipantResults(groupJid, r as unknown as Array<Record<string, unknown>>, timeoutMs)
+    auditParticipantAction(ctx, 'group.pending.reject', accountId, groupJid, results)
+    reply.send(results)
   })
 
   app.post('/v1/groups/health-report', async (req, reply) => {
@@ -320,6 +379,13 @@ export const registerGroupsRoutes: RouteRegistrar = (app, ctx) => {
     for (const report of reports) {
       await ctx.publisher.publish('group.health_reported', report.accountId ?? report.groupJid, report)
     }
+    auditInfo(ctx.logger, 'group.health_report', {
+      accepted: reports.length,
+      health: reports.reduce<Record<string, number>>((acc, r) => {
+        acc[r.health] = (acc[r.health] ?? 0) + 1
+        return acc
+      }, {})
+    })
     reply.send({ accepted: reports.length, rejected: 0 })
   })
 }
