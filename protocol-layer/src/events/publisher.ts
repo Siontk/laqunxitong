@@ -7,7 +7,7 @@
  *   3. 失败重试 3 次，仍失败写入本地 DLQ 文件并报警。
  */
 
-import { Kafka, logLevel, type Producer, type SASLOptions } from 'kafkajs'
+import { Kafka, CompressionTypes, logLevel, type Producer, type SASLOptions } from 'kafkajs'
 import { mkdir, appendFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -40,6 +40,13 @@ export async function createEventPublisher(
 ): Promise<EventPublisher> {
   let producer: Producer | null = null
   let connected = false
+  let inflightCount = 0
+  const maxInflight = config.kafka.maxInflightMessages
+
+  const trackInflight = (delta: number): void => {
+    inflightCount += delta
+    metrics.kafkaProducerInflight.set(Math.max(0, inflightCount))
+  }
 
   async function writeDlq(envelope: EventEnvelope, err: unknown): Promise<void> {
     const day = new Date().toISOString().slice(0, 10)
@@ -88,6 +95,10 @@ export async function createEventPublisher(
     })
     producer = kafka.producer({
       allowAutoTopicCreation: false,
+      // idempotent=true 保证消息不重复（forced maxInFlight=1 + acks=-1）。
+      // 在 2000 账号规模下，单条 send 的网络往返开销不可忽视，但比起重复消息
+      // 的业务侧去重成本，幂等仍然更划算。Kafka 客户端自身会在 protocol 层做
+      // 一定程度的 batching（同 broker 多 partition 合并 produce request）。
       idempotent: true,
       maxInFlightRequests: 1,
       retry: {
@@ -130,6 +141,10 @@ export async function createEventPublisher(
     await p.send({
       topic: topicFor(envelope.event),
       acks: -1,
+      // GZIP/LZ4/Snappy 都能用，LZ4 综合速度最快。AWS MSK 默认开 LZ4。
+      // 2000 账号 message.received + state_changed 这类高频事件压缩比能到 5-10x，
+      // 节省 broker 入向带宽和 broker 端磁盘 IO。
+      compression: CompressionTypes.LZ4,
       messages: [
         {
           key: envelope.accountId,
@@ -152,6 +167,31 @@ export async function createEventPublisher(
     data: TData,
     evidence?: Record<string, unknown>
   ): Promise<void> {
+    // ── 反压：inflight 超过阈值直接进 DLQ，不让 producer queue 撑爆 heap ──
+    //
+    // 触发场景：Kafka broker 挂掉或网络分区，producer 还在重试中，
+    // 业务侧持续 publish 把 inflight 堆到几万。如果不限制，Node heap 飙升 OOM。
+    // 限制后超出的事件直接写本地 DLQ jsonl，Kafka 恢复后由运维脚本回放。
+    if (inflightCount >= maxInflight) {
+      metrics.eventsPublishErrorsTotal.inc({ event: evt, reason: 'inflight_limit' })
+      const envelope: EventEnvelope = {
+        eventId: createEventId(accountId, evt),
+        event: evt,
+        version: 'v1',
+        accountId,
+        occurredAt: new Date().toISOString(),
+        workerId: config.workerId,
+        evidence,
+        data: data as Record<string, unknown>
+      }
+      try {
+        await writeDlq(envelope, new Error('inflight_limit_exceeded'))
+      } catch {
+        metrics.eventsPublishErrorsTotal.inc({ event: evt, reason: 'dlq_write_failed' })
+      }
+      return
+    }
+
     const envelope: EventEnvelope = {
       eventId: createEventId(accountId, evt),
       event: evt,
@@ -163,31 +203,36 @@ export async function createEventPublisher(
       data: data as Record<string, unknown>
     }
 
-    let lastErr: unknown
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        await publishOnce(envelope)
-        metrics.eventsPublishedTotal.inc({ event: evt })
-        return
-      } catch (err) {
-        lastErr = err
-        connected = false
-        metrics.eventsPublishErrorsTotal.inc({ event: evt, reason: 'publish_failed' })
-        logger.warn({ err, evt, attempt, accountId, topic: topicFor(evt) }, 'event publish attempt failed')
-        await new Promise(r => setTimeout(r, attempt * 300))
-      }
-    }
-
-    metrics.eventsPublishErrorsTotal.inc({ event: evt, reason: 'dlq' })
+    trackInflight(1)
     try {
-      await writeDlq(envelope, lastErr)
-      logger.error(
-        { envelope, err: lastErr, dlqDir: config.events.dlqDir },
-        'event publish exhausted — written to DLQ'
-      )
-    } catch (dlqErr) {
-      metrics.eventsPublishErrorsTotal.inc({ event: evt, reason: 'dlq_write_failed' })
-      logger.error({ envelope, err: lastErr, dlqErr }, 'event publish exhausted — DLQ write failed')
+      let lastErr: unknown
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await publishOnce(envelope)
+          metrics.eventsPublishedTotal.inc({ event: evt })
+          return
+        } catch (err) {
+          lastErr = err
+          connected = false
+          metrics.eventsPublishErrorsTotal.inc({ event: evt, reason: 'publish_failed' })
+          logger.warn({ err, evt, attempt, accountId, topic: topicFor(evt) }, 'event publish attempt failed')
+          await new Promise(r => setTimeout(r, attempt * 300))
+        }
+      }
+
+      metrics.eventsPublishErrorsTotal.inc({ event: evt, reason: 'dlq' })
+      try {
+        await writeDlq(envelope, lastErr)
+        logger.error(
+          { envelope, err: lastErr, dlqDir: config.events.dlqDir },
+          'event publish exhausted — written to DLQ'
+        )
+      } catch (dlqErr) {
+        metrics.eventsPublishErrorsTotal.inc({ event: evt, reason: 'dlq_write_failed' })
+        logger.error({ envelope, err: lastErr, dlqErr }, 'event publish exhausted — DLQ write failed')
+      }
+    } finally {
+      trackInflight(-1)
     }
   }
 

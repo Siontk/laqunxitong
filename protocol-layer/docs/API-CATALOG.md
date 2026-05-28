@@ -14,11 +14,15 @@
 
 错误码：
 - `400 VALIDATION_ERROR` body schema 错
+- `400 PROXY_REQUIRED` 账号未绑代理且 body 未传 → 先 `/v1/accounts/{id}/proxy/bind`
 - `404 ACCOUNT_NOT_FOUND` 当前 worker 没该账号运行态 → 看 `/status` slotReleased?
 - `409 NOT_OWNER` 改请求 `details.ownerEndpoint`
 - `422 NEED_REAUTH` 必须重做 pairing
 - `422 NOT_BUSINESS_ACCOUNT` 个人号调 Business 接口
 - `429 RATE_LIMITED` 退避重试，看 `retryAfterMs`
+- `429 ONLINE_LIMITED` 单 `/online` 限流命中，**批量场景改用 `/v1/accounts/online/batch`**
+- `429 RECONNECT_LIMITED` 重连限流命中
+- `429 ACCOUNT_BUSY` / `WORKER_BUSY` 群操作互斥锁
 - `503 ACCOUNT_UNAVAILABLE` 查 `/usability` 决定下一步
 
 ---
@@ -115,13 +119,100 @@ POST /v1/accounts/import/batch
 
 ## 2. 账号生命周期
 
+### 2.1 单账号生命周期
+
 ```http
 POST /v1/accounts/{id}/online   { proxy?: {...} }    # 用已存 creds 上线；body proxy 可选，但必须已绑定 proxy
 POST /v1/accounts/{id}/offline                       # 主动下线（保留 creds）
+POST /v1/accounts/offline/batch                      # 批量下线（保留 creds，释放 runtime slot）
 POST /v1/accounts/{id}/logout                        # 远端踢设备 + 删 creds
+POST /v1/accounts/{id}/reconnect { reason }          # 主动重连（换 IP / STALE 恢复）
 ```
 
 **换 IP 不需要 logout/online**，调 `/proxy/rebind` 即可。
+
+### 2.2 批量下线（推荐：批量暂停/维护窗口）
+
+批量下线只断开 socket、释放 worker runtime slot，保留 creds / keys / proxy / Registry owner 绑定。再次调用 `/online` 或 `/online/batch` 不需要重新授权。
+
+```http
+POST /v1/accounts/offline/batch
+{
+  "accountIds": ["acc_001", "acc_002"],
+  "reason": "task_pause",
+  "maxWaitMs": 30000
+}
+→ 200 {
+  "summary": {
+    "requested": 2, "local": 1, "remote": 1,
+    "offline": 1, "alreadyOffline": 0, "notFound": 0, "error": 0
+  },
+  "results": [
+    { "accountId": "acc_001", "result": "offline" }
+  ],
+  "remote": [
+    {
+      "accountId": "acc_002",
+      "ownerWorkerId": "node-b-w2",
+      "ownerEndpoint": "http://10.0.1.13:8082",
+      "note": "redispatch to ownerEndpoint"
+    }
+  ]
+}
+```
+
+业务侧处理：
+1. `offline` / `already_offline` 都可展示为离线。
+2. `remote[]` 按 `ownerEndpoint` 分组后递归调 `POST {ownerEndpoint}/v1/accounts/offline/batch`。
+3. `not_found` 表示 Registry 未分配 owner，可按业务显示未知或离线。
+4. 需要重新上线时走 `/v1/accounts/online/batch`。
+
+### 2.3 批量上线（推荐：2000 账号场景）
+
+竞品级"主动下线后批量重新拉起"专用接口。**单 `/online` 并发 2000 会触发 ONLINE_LIMITED 限流，必须改这个**。
+
+```http
+POST /v1/accounts/online/batch
+{
+  "items": [
+    { "accountId": "acc_001" },
+    { "accountId": "acc_002", "proxy": {...} },
+    ...                                     // 单次最多 500，超过返 400
+  ],
+  "maxWaitMs": 60000                        // 单账号在 OnlineGate 上的最长等待，默认 60s
+}
+→ 200 {
+  "requestedAt": "2026-05-28T10:00:00Z",
+  "elapsedMs": 62315,
+  "summary": {
+    "requested": 500, "local": 480, "remote": 20,
+    "accepted": 478, "timeout": 2, "proxyRequired": 0, "error": 0
+  },
+  "results": [
+    { "accountId": "acc_001", "result": "accepted" },
+    { "accountId": "acc_999", "result": "timeout", "retryAfterMs": 5000 },
+    ...
+  ],
+  "remote": [
+    {
+      "accountId": "acc_remote_1",
+      "ownerWorkerId": "node-b-w2",
+      "ownerEndpoint": "http://10.0.1.13:8082",
+      "note": "redispatch to ownerEndpoint"
+    }
+  ]
+}
+```
+
+**业务侧用法**：
+1. 第一次调 batch 接口，拿到 `remote[]` 列表
+2. 按 `ownerEndpoint` 分组，递归调 `POST {ownerEndpoint}/v1/accounts/online/batch`
+3. 直到所有账号都返回 `accepted` / `error` / `timeout`
+4. `timeout` 的账号下次重试即可（OnlineGate 容量恢复后能放行）
+
+**SLA 预估**（4C8G 单节点 × 50/s 闸门 × 4 worker libsignal 并行）：
+- 2000 账号端到端 ~ 60-90s，对齐竞品 2 分钟 baseline
+- 节流参数：`NODE_ONLINE_PER_SEC` / `GLOBAL_ONLINE_PER_SEC` / `BATCH_ONLINE_MAX_SIZE` / `BATCH_ONLINE_WAIT_MS`
 
 ---
 
@@ -421,7 +512,7 @@ Kafka message key 固定为 `accountId`，同账号事件在同一 partition 内
 | 事件 | 业务侧用法 |
 |---|---|
 | `account.state_changed` | 状态机驱动业务侧账号管理 |
-| `account.heartbeat` | 30s 心跳，检测 worker 健康 |
+| `account.heartbeat` | 账号级 Kafka 心跳，默认关闭；如开启默认 300s，功能层状态展示优先看 state_changed/status/alive |
 | `account.online_changed` | ONLINE 翻转，刷新业务侧 owner 缓存 |
 | `account.stale_detected` | 监控告警 |
 | `account.need_reauth` | 触发重新 pairing 工单 |

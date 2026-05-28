@@ -51,6 +51,8 @@ export function addOwnerGuard(app: FastifyInstance, ctx: RouteContext): void {
     if (req.url.startsWith('/v1/admin/')) return
     if (req.url.startsWith('/v1/accounts/resolve')) return
     if (req.url.startsWith('/v1/accounts/import')) return
+    if (req.url.startsWith('/v1/accounts/online/batch')) return
+    if (req.url.startsWith('/v1/accounts/offline/batch')) return
     if (req.url.startsWith('/v1/auth/')) return
     // proxy/bind / get / delete 可以在任意 worker 调（ProxyStore 共享 Redis），无需 owner check
     // proxy/rebind 需要 owner check（要触发 owner worker 上的 socket 重建）

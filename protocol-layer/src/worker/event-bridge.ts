@@ -9,14 +9,18 @@
  *   message.received / message.ack / group.participant_changed / group.metadata_updated
  *
  * 每条事件强制带 evidence + occurredAt + workerId（业务层乱序检测）。
+ *
+ * 所有 publish 都是 fire-and-forget 但显式 .catch 防 unhandledRejection。
+ * Kafka 抖动时 publisher 内部走 3 次重试 + 写 DLQ，这里不阻塞 Baileys 事件循环。
  */
 
 import type { WASocket } from 'baileys'
 
-import type { EventPublisher } from '../events/publisher.js'
+import type { EventPublisher, EventEnvelope } from '../events/publisher.js'
 import type { Logger } from '../observability/logger.js'
 import type { Metrics } from '../observability/metrics.js'
 import type { BusinessDetection } from '../types/api.js'
+import type { EventType } from '../events/subjects.js'
 
 export interface EventBridgeContext {
   accountId: string
@@ -35,18 +39,26 @@ export function attachEventBridge(
 ): () => void {
   const ev = sock.ev
 
+  // 统一的 fire-and-forget publish：失败只打 warn，不让 unhandledRejection 拽掉进程
+  const pub = <T>(evt: EventType, data: T, evidence?: Record<string, unknown>): void => {
+    void publisher
+      .publish(evt, ctx.accountId, data as EventEnvelope['data'], evidence)
+      .catch(err =>
+        logger.warn({ err, evt, accountId: ctx.accountId }, 'event-bridge publish failed')
+      )
+  }
+
   // ──────── connection.update ────────
   const onConnUpdate = (update: Parameters<Parameters<typeof ev.on<'connection.update'>>[1]>[0]): void => {
     if (update.qr) {
-      publisher.publish('qr.code_generated', ctx.accountId, {
+      pub('qr.code_generated', {
         qrBase64: update.qr,
         expiresAt: new Date(Date.now() + 60_000).toISOString()
       })
     }
     if (update.reachoutTimeLock) {
-      publisher.publish(
+      pub(
         'account.restricted',
-        ctx.accountId,
         {
           isActive: !!update.reachoutTimeLock.isActive,
           restrictedUntil: update.reachoutTimeLock.timeEnforcementEnds?.toISOString() ?? null,
@@ -68,9 +80,8 @@ export function attachEventBridge(
       const content = (msg.message ?? {}) as unknown as Record<string, unknown>
       const type = inferMessageType(content)
 
-      publisher.publish(
+      pub(
         'message.received',
-        ctx.accountId,
         {
           key: msg.key,
           fromJid,
@@ -93,9 +104,8 @@ export function attachEventBridge(
       if (!u.update) continue
       // 撤回 / 状态变化
       if (u.update.status != null || u.update.message === null) {
-        publisher.publish(
+        pub(
           'message.ack',
-          ctx.accountId,
           {
             key: u.key,
             status: u.update.message === null ? 'revoked' : mapAckStatus(u.update.status),
@@ -112,9 +122,8 @@ export function attachEventBridge(
   const onGroupPart = (
     update: Parameters<Parameters<typeof ev.on<'group-participants.update'>>[1]>[0]
   ): void => {
-    publisher.publish(
+    pub(
       'group.participant_changed',
-      ctx.accountId,
       {
         groupJid: update.id,
         action: update.action,
@@ -131,9 +140,8 @@ export function attachEventBridge(
   const onGroupsUpdate = (updates: Parameters<Parameters<typeof ev.on<'groups.update'>>[1]>[0]): void => {
     for (const g of updates) {
       if (!g.id) continue
-      publisher.publish(
+      pub(
         'group.metadata_updated',
-        ctx.accountId,
         {
           groupJid: g.id,
           changes: {
@@ -152,13 +160,16 @@ export function attachEventBridge(
   ev.on('groups.update', onGroupsUpdate)
 
   // ──────── message-capping.update ────────
+  // metric 是 Counter：每次状态切换 +1，PromQL 里用 rate() 看变化趋势。
+  // 旧版用 Gauge.inc() 单调累计是错的（永远不 dec）；当前"在 CAPPED 状态的账号数"
+  // 由业务侧通过 account.new_chat_capping 事件聚合，不放进 Prometheus（高基数）。
   const onCapping = (info: Parameters<Parameters<typeof ev.on<'message-capping.update'>>[1]>[0]): void => {
-    metrics.messageCappingStatus.inc({ status: info.capping_status ?? 'NONE' })
-    publisher.publish(
+    const status = info.capping_status ?? 'NONE'
+    metrics.messageCappingTransitionTotal.inc({ status })
+    pub(
       'account.new_chat_capping',
-      ctx.accountId,
       {
-        cappingStatus: info.capping_status ?? 'NONE',
+        cappingStatus: status,
         remaining:
           info.total_quota != null && info.used_quota != null
             ? info.total_quota - info.used_quota

@@ -48,10 +48,20 @@ const ConfigSchema = z.object({
     topicMessage: z.string().default('protocol.message.events.v1'),
     topicGroup: z.string().default('protocol.group.events.v1'),
     topicPairing: z.string().default('protocol.pairing.events.v1'),
-    topicDlq: z.string().default('protocol.dlq.v1')
+    topicDlq: z.string().default('protocol.dlq.v1'),
+    /** producer 未 ack 消息上限。超过 → 直接写本地 DLQ，防 Kafka 挂时 Node OOM。
+     *  正常稳态 inflight ≈ 10-50。单 broker 偶发抖动可能瞬时到 200-500。
+     *  上限 2000 给安全余量，超 2000 大概率是 broker 挂死。 */
+    maxInflightMessages: z.coerce.number().default(2000)
   }),
 
   // ── Redis（L2 keys + Registry + 令牌桶）──
+  //
+  // 客户端容错参数：
+  //   - commandTimeoutMs=5s    Redis 慢命令 fail-fast，不让 Node 永远等
+  //   - maxRetriesPerRequest=3 失败重试 3 次后 reject 命令，业务路径自降级
+  //   - maxOfflineQueueSize    Redis 挂时本地堆积命令上限，防 OOM
+  //   - connectTimeoutMs=5s    连接握手超时
   redis: z.object({
     url: z.string().default('redis://localhost:6379'),
     registryUrl: z.string().optional(),
@@ -59,41 +69,94 @@ const ConfigSchema = z.object({
     rateLimitUrl: z.string().optional(),
     runtimeUrl: z.string().optional(),
     db: z.coerce.number().default(0),
-    keyPrefix: z.string().default('unsea:')
+    keyPrefix: z.string().default('unsea:'),
+    commandTimeoutMs: z.coerce.number().default(5_000),
+    maxRetriesPerRequest: z.coerce.number().default(3),
+    maxOfflineQueueSize: z.coerce.number().default(1000),
+    connectTimeoutMs: z.coerce.number().default(5_000)
   }),
 
   // ── MySQL（L3 creds 持久化）──
+  //
+  // 每 worker 一个独立连接池。4 worker × 8 = 32 connections 到 MySQL，
+  // MySQL 默认 max_connections=151 一台 8C 实例够 4-5 节点共享。
+  // 2000 同时上线产生 ~2000 个异步 INSERT，每 connection 处理 60+ INSERT，
+  // 每个 ~ 5ms → 总耗时 ~ 300ms 写满。MySQL 是异步 L3 不阻塞业务。
   mysql: z.object({
     enabled: z.coerce.boolean().default(false),
-    connectionUri: z.string().default('mysql://unsea:unsea@localhost:3306/unsea')
+    connectionUri: z.string().default('mysql://unsea:unsea@localhost:3306/unsea'),
+    connectionLimit: z.coerce.number().default(8),
+    maxIdle: z.coerce.number().default(4),
+    idleTimeoutMs: z.coerce.number().default(30_000),
+    connectTimeoutMs: z.coerce.number().default(5_000),
+    /** 慢写阈值（ms），超过记 warn 日志，方便排查 L3 抖动 */
+    slowWriteMs: z.coerce.number().default(500)
   }),
 
   // ── Worker 容量 ──
+  //
+  // 目标：4C8G 单节点 4 worker × 500 账号 = 2000 在线。
+  // 关键约束：Node 单线程，每 worker 必须独立进程，max-old-space-size ≈ 1.5GB。
   worker: z.object({
-    maxAccountsPerWorker: z.coerce.number().default(400),
-    keepAliveIntervalMs: z.coerce.number().default(30_000),
+    maxAccountsPerWorker: z.coerce.number().default(500),
+    keepAliveIntervalMs: z.coerce.number().default(20_000),
+    keepAliveJitterMinMs: z.coerce.number().default(15_000),
+    keepAliveJitterMaxMs: z.coerce.number().default(20_000),
     staleCheckIntervalMs: z.coerce.number().default(5_000),
     staleThresholdMs: z.coerce.number().default(35_000),
-    maxOldSpaceMB: z.coerce.number().default(1280),
+    maxOldSpaceMB: z.coerce.number().default(1536),
     heartbeatIntervalMs: z.coerce.number().default(30_000),
     heartbeatEventEnabled: z.coerce.boolean().default(false),
-    heartbeatEventIntervalMs: z.coerce.number().default(300_000)
+    heartbeatEventIntervalMs: z.coerce.number().default(300_000),
+    /** L1 keys 缓存大小。每条 ~ 1KB，4 worker × 200k = 800MB 内存预算。
+     *  生产经验：命中率 80% 已足够，再大边际收益递减。 */
+    keysL1Size: z.coerce.number().default(200_000),
+    /** L1 creds 缓存大小。creds 比 keys 少很多，每 worker 留 50k 即可。 */
+    credsL1Size: z.coerce.number().default(50_000)
   }),
 
-  // ── 重连风暴控制 ──
+  // ── 重连风暴控制 + 业务节流 ──
+  //
+  // 默认值是按"4C8G × 2000 账号"调好的。集群更大时直接设环境变量调高。
+  //
+  // 业务负载估算（参考竞品 1000 账号 × 100 群 × 100 人 / 15-20min = ~200 ops/s）：
+  //   - 单 worker 500 账号稳态拉群强度 ≈ 100 ops/s
+  //   - 4 worker × 100/s = 400 ops/s 节点上限，留 2 倍 burst
   rateLimit: z.object({
-    nodeReconnectPerSec: z.coerce.number().default(10),
-    globalReconnectPerSec: z.coerce.number().default(50),
+    /** 单节点全部 worker 加起来的重连预算 */
+    nodeReconnectPerSec: z.coerce.number().default(20),
+    /** 集群级重连预算（多节点协调），生产配置实际节点数 × nodeReconnectPerSec */
+    globalReconnectPerSec: z.coerce.number().default(100),
     accountReconnectCooldownMs: z.coerce.number().default(60_000),
-    reconnectBurst: z.coerce.number().default(20),
-    workerGroupOpPerSec: z.coerce.number().default(10),
-    workerGroupOpBurst: z.coerce.number().default(20),
-    groupAccountLockTtlMs: z.coerce.number().default(30_000),
+    reconnectBurst: z.coerce.number().default(40),
+    /** 单 worker 群操作 token 桶填充率（10 → 100）。
+     *  竞品级强度需要 ~100 ops/s/worker；调低就会限流业务 */
+    workerGroupOpPerSec: z.coerce.number().default(100),
+    workerGroupOpBurst: z.coerce.number().default(200),
+    /** per-account 群操作锁 TTL。100 人加群可能花 30-60s，给到 90s 安全 */
+    groupAccountLockTtlMs: z.coerce.number().default(90_000),
     groupAccountBusyRetryMs: z.coerce.number().default(3_000),
-    workerGroupBusyRetryMs: z.coerce.number().default(5_000),
+    workerGroupBusyRetryMs: z.coerce.number().default(2_000),
     sessionIdJitterMaxSec: z.coerce.number().default(900),
-    coldStartBatchSize: z.coerce.number().default(50),
-    coldStartIntervalMs: z.coerce.number().default(30_000)
+    /** 冷启动 batch 大小（每 worker）。4 worker × 25 / 15s = 6.7 acc/s 单节点上线，
+     *  2000 账号大约 5 分钟全部到 ONLINE。 */
+    coldStartBatchSize: z.coerce.number().default(25),
+    coldStartIntervalMs: z.coerce.number().default(15_000),
+    /** 单节点 /online 路由上线节奏（含批量接口）。
+     *  50/s × 单节点 → 2000 账号 40s 通过限流闸门；
+     *  配合 Baileys Noise 握手异步并行，端到端 ~ 60-90s 全部 ONLINE，
+     *  对齐竞品 2 分钟 2000 上线 baseline。
+     *  调低会让限流更紧（更慢但 CPU 更稳）；调高超过 100/s 单 4C8G 节点会卡 event loop。 */
+    nodeOnlinePerSec: z.coerce.number().default(50),
+    nodeOnlineBurst: z.coerce.number().default(100),
+    /** 集群级上线预算（多节点协调）。生产配置实际节点数 × nodeOnlinePerSec */
+    globalOnlinePerSec: z.coerce.number().default(200),
+    /** 单账号 online 后冷却（防业务侧反复 /online 同一个号） */
+    accountOnlineCooldownMs: z.coerce.number().default(5_000),
+    /** 批量上线接口单次最大账号数 */
+    batchOnlineMaxSize: z.coerce.number().default(500),
+    /** 批量上线单账号 token 等待超时（超时则该账号返回 429，调用方下次重试） */
+    batchOnlineWaitMs: z.coerce.number().default(60_000)
   }),
 
   // ── Baileys 配置 ──
@@ -165,7 +228,8 @@ export function loadConfig(): Config {
       topicMessage: process.env.KAFKA_TOPIC_MESSAGE,
       topicGroup: process.env.KAFKA_TOPIC_GROUP,
       topicPairing: process.env.KAFKA_TOPIC_PAIRING,
-      topicDlq: process.env.KAFKA_TOPIC_DLQ
+      topicDlq: process.env.KAFKA_TOPIC_DLQ,
+      maxInflightMessages: process.env.KAFKA_MAX_INFLIGHT_MESSAGES
     },
     redis: {
       url: process.env.REDIS_URL,
@@ -174,21 +238,34 @@ export function loadConfig(): Config {
       rateLimitUrl: process.env.RATELIMIT_REDIS_URL,
       runtimeUrl: process.env.RUNTIME_REDIS_URL,
       db: process.env.REDIS_DB,
-      keyPrefix: process.env.REDIS_KEY_PREFIX
+      keyPrefix: process.env.REDIS_KEY_PREFIX,
+      commandTimeoutMs: process.env.REDIS_COMMAND_TIMEOUT_MS,
+      maxRetriesPerRequest: process.env.REDIS_MAX_RETRIES_PER_REQUEST,
+      maxOfflineQueueSize: process.env.REDIS_MAX_OFFLINE_QUEUE_SIZE,
+      connectTimeoutMs: process.env.REDIS_CONNECT_TIMEOUT_MS
     },
     mysql: {
       enabled: process.env.MYSQL_ENABLED,
-      connectionUri: process.env.MYSQL_CONNECTION_URI
+      connectionUri: process.env.MYSQL_CONNECTION_URI,
+      connectionLimit: process.env.MYSQL_CONNECTION_LIMIT,
+      maxIdle: process.env.MYSQL_MAX_IDLE,
+      idleTimeoutMs: process.env.MYSQL_IDLE_TIMEOUT_MS,
+      connectTimeoutMs: process.env.MYSQL_CONNECT_TIMEOUT_MS,
+      slowWriteMs: process.env.MYSQL_SLOW_WRITE_MS
     },
     worker: {
       maxAccountsPerWorker: process.env.MAX_ACCOUNTS_PER_WORKER,
       keepAliveIntervalMs: process.env.KEEPALIVE_INTERVAL_MS,
+      keepAliveJitterMinMs: process.env.KEEPALIVE_JITTER_MIN_MS,
+      keepAliveJitterMaxMs: process.env.KEEPALIVE_JITTER_MAX_MS,
       staleCheckIntervalMs: process.env.STALE_CHECK_INTERVAL_MS,
       staleThresholdMs: process.env.STALE_THRESHOLD_MS,
       maxOldSpaceMB: process.env.MAX_OLD_SPACE_MB,
       heartbeatIntervalMs: process.env.HEARTBEAT_INTERVAL_MS,
       heartbeatEventEnabled: process.env.HEARTBEAT_EVENT_ENABLED,
-      heartbeatEventIntervalMs: process.env.HEARTBEAT_EVENT_INTERVAL_MS
+      heartbeatEventIntervalMs: process.env.HEARTBEAT_EVENT_INTERVAL_MS,
+      keysL1Size: process.env.KEYS_L1_SIZE,
+      credsL1Size: process.env.CREDS_L1_SIZE
     },
     rateLimit: {
       nodeReconnectPerSec: process.env.NODE_RECONNECT_PER_SEC,
@@ -202,7 +279,13 @@ export function loadConfig(): Config {
       workerGroupBusyRetryMs: process.env.WORKER_GROUP_BUSY_RETRY_MS,
       sessionIdJitterMaxSec: process.env.SESSION_JITTER_MAX_SEC,
       coldStartBatchSize: process.env.COLD_START_BATCH_SIZE,
-      coldStartIntervalMs: process.env.COLD_START_INTERVAL_MS
+      coldStartIntervalMs: process.env.COLD_START_INTERVAL_MS,
+      nodeOnlinePerSec: process.env.NODE_ONLINE_PER_SEC,
+      nodeOnlineBurst: process.env.NODE_ONLINE_BURST,
+      globalOnlinePerSec: process.env.GLOBAL_ONLINE_PER_SEC,
+      accountOnlineCooldownMs: process.env.ACCOUNT_ONLINE_COOLDOWN_MS,
+      batchOnlineMaxSize: process.env.BATCH_ONLINE_MAX_SIZE,
+      batchOnlineWaitMs: process.env.BATCH_ONLINE_WAIT_MS
     },
     baileys: {
       syncFullHistory: process.env.BAILEYS_SYNC_HISTORY,

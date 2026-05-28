@@ -11,6 +11,7 @@ import type { Metrics } from '../observability/metrics.js'
 import type { EventPublisher } from '../events/publisher.js'
 import type { OperationGate } from '../rate-limit/operation-gate.js'
 import type { ReconnectGate } from '../rate-limit/reconnect-limiter.js'
+import type { OnlineGate } from '../rate-limit/online-limiter.js'
 import type { AccountManager } from '../worker/account-manager.js'
 import type { Registry } from '../registry/registry.js'
 import type { CredsStore } from '../store/creds-store.js'
@@ -26,6 +27,7 @@ export interface RouteContext {
   publisher: EventPublisher
   operationGate: OperationGate
   reconnectGate: ReconnectGate
+  onlineGate: OnlineGate
   accounts: AccountManager
   registry: Registry
   credsStore: CredsStore

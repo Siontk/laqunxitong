@@ -429,6 +429,8 @@ POST /v1/accounts/import/batch
 
 用途：已有 creds 重新建立 socket，不重新授权。
 
+少量账号手动上线时使用这个接口；批量恢复、2000 账号同时拉起、故障后重启恢复时使用 **4.2 批量上线**，不要并发打大量单账号 `/online`。
+
 ```http
 POST /v1/accounts/{accountId}/online
 ```
@@ -456,7 +458,94 @@ POST /v1/accounts/{accountId}/online
 }
 ```
 
-### 4.2 手动离线
+常见错误：
+
+| HTTP | code | 说明 | 处理 |
+|---|---|---|---|
+| 400 | PROXY_REQUIRED | 账号没有绑定代理且 body 未传 | 先绑定代理，或 body 带 proxy |
+| 409 | NOT_OWNER | 当前 worker 不是 owner | 用 `details.ownerEndpoint` 刷新缓存后重试一次 |
+| 429 | ONLINE_LIMITED | OnlineGate 限流命中 | 批量场景改用 `/v1/accounts/online/batch` |
+
+`ONLINE_LIMITED.details.reason` 可能是 `account_online_cooldown`、`node_online_limited`、`global_online_limited`，响应会带 `retryAfterMs` 和 `cooldownUntil`。
+
+### 4.2 批量上线
+
+用途：主动下线后批量重新拉起、测试环境 2000 账号上线、故障恢复后批量恢复 socket。
+
+```http
+POST /v1/accounts/online/batch
+```
+
+请求：
+
+```json
+{
+  "items": [
+    { "accountId": "acc_001" },
+    {
+      "accountId": "acc_002",
+      "proxy": {
+        "protocol": "socks5",
+        "url": "socks5://user:pass@proxy.example.com:1080",
+        "sessionId": "acc_002",
+        "country": "US"
+      }
+    }
+  ],
+  "maxWaitMs": 60000
+}
+```
+
+响应：
+
+```json
+{
+  "requestedAt": "2026-05-25T12:00:00.000Z",
+  "elapsedMs": 43000,
+  "summary": {
+    "requested": 2,
+    "local": 1,
+    "remote": 1,
+    "accepted": 1,
+    "timeout": 0,
+    "proxyRequired": 0,
+    "error": 0
+  },
+  "results": [
+    { "accountId": "acc_001", "result": "accepted" }
+  ],
+  "remote": [
+    {
+      "accountId": "acc_002",
+      "ownerWorkerId": "worker-002",
+      "ownerEndpoint": "http://10.0.1.13:8082",
+      "note": "redispatch to ownerEndpoint"
+    }
+  ]
+}
+```
+
+字段说明：
+
+| 字段 | 说明 |
+|---|---|
+| `items` | 单次 1-500 个账号，默认上限由 `BATCH_ONLINE_MAX_SIZE` 控制 |
+| `maxWaitMs` | 单账号等待 OnlineGate 令牌的最长时间，默认 60000，最大 180000 |
+| `results[]` | 当前 owner 本地处理结果 |
+| `remote[]` | 不属于当前 worker 的账号，功能层要按 `ownerEndpoint` 二次分发 |
+
+`results[].result`：
+
+| result | 说明 | 处理 |
+|---|---|---|
+| accepted | 已发起 Noise 握手 | 等 `account.state_changed ONLINE` |
+| timeout | 等待 OnlineGate 超时 | 按 `retryAfterMs` 或业务退避重试 |
+| proxy_required | 未绑定代理 | 先 `/proxy/bind` 或下次 item 带 proxy |
+| error | 协议层异常 | 看 `error` 字段定位 |
+
+功能层处理 `remote[]` 时，按 `ownerEndpoint` 分组后调用 `POST {ownerEndpoint}/v1/accounts/online/batch`。如果 `ownerEndpoint=null`，先 resolve 纠偏；不要盲打所有 worker。
+
+### 4.3 手动离线
 
 用途：主动断开 socket，保留 creds，不占 active slot。
 
@@ -470,7 +559,65 @@ POST /v1/accounts/{accountId}/offline
 { "ok": true }
 ```
 
-### 4.3 logout
+### 4.4 批量下线
+
+用途：批量暂停账号、维护窗口释放在线容量。只断开 socket，保留 creds / keys / proxy / owner 绑定；再次上线不需要重新授权。
+
+```http
+POST /v1/accounts/offline/batch
+```
+
+请求：
+
+```json
+{
+  "accountIds": ["acc_001", "acc_002"],
+  "reason": "task_pause",
+  "maxWaitMs": 30000
+}
+```
+
+响应：
+
+```json
+{
+  "requestedAt": "2026-05-28T12:00:00.000Z",
+  "elapsedMs": 1200,
+  "summary": {
+    "requested": 2,
+    "local": 1,
+    "remote": 1,
+    "offline": 1,
+    "alreadyOffline": 0,
+    "notFound": 0,
+    "error": 0
+  },
+  "results": [
+    { "accountId": "acc_001", "result": "offline" }
+  ],
+  "remote": [
+    {
+      "accountId": "acc_002",
+      "ownerWorkerId": "worker-002",
+      "ownerEndpoint": "http://10.0.1.13:8082",
+      "note": "redispatch to ownerEndpoint"
+    }
+  ]
+}
+```
+
+功能层处理：
+
+| result | 说明 | 处理 |
+|---|---|---|
+| offline | 已断开 socket | 前端显示离线 |
+| already_offline | 已经离线或 slot 已释放 | 前端显示离线 |
+| not_found | Registry 没有 owner | 显示未知/离线，按业务决定是否 resolve |
+| error | 协议异常 | 延迟重试 |
+
+`remote[]` 按 `ownerEndpoint` 分组后继续调用 `POST {ownerEndpoint}/v1/accounts/offline/batch`。
+
+### 4.5 logout
 
 用途：退出并移除设备，删除 creds，解除 Registry 绑定。
 
@@ -506,7 +653,9 @@ GET /v1/accounts/{accountId}/status
     "lastDateRecv": "2026-05-19T10:00:00.000Z",
     "lastPingAckAt": "2026-05-19T10:00:00.000Z",
     "ageMs": 120,
-    "keepAliveIntervalMs": 30000
+    "keepAliveIntervalMs": 17342,
+    "keepAliveJitterMinMs": 15000,
+    "keepAliveJitterMaxMs": 20000
   },
   "accountType": "UNKNOWN",
   "deviceProfile": {

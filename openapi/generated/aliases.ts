@@ -29,6 +29,23 @@ export type PortableExport = components['schemas']['PortableExport']
 export type BatchExportResult = components['schemas']['BatchExportResult']
 export type ImportResult = components['schemas']['ImportResult']
 
+// 批量上线（4C8G × 2000 账号场景的主入口）
+export type BatchOnlineItem = components['schemas']['BatchOnlineItem']
+export type BatchOnlineBody = components['schemas']['BatchOnlineBody']
+export type BatchOnlineItemResult = components['schemas']['BatchOnlineItemResult']
+export type BatchOnlineRemoteItem = components['schemas']['BatchOnlineRemoteItem']
+export type BatchOnlineSummary = components['schemas']['BatchOnlineSummary']
+export type BatchOnlineResult = components['schemas']['BatchOnlineResult']
+export type BatchOnlineItemStatus = BatchOnlineItemResult['result']  // 'accepted' | 'timeout' | 'proxy_required' | 'error'
+
+// 批量下线（保留 creds / owner，释放 runtime slot）
+export type BatchOfflineBody = components['schemas']['BatchOfflineBody']
+export type BatchOfflineItemResult = components['schemas']['BatchOfflineItemResult']
+export type BatchOfflineRemoteItem = components['schemas']['BatchOfflineRemoteItem']
+export type BatchOfflineSummary = components['schemas']['BatchOfflineSummary']
+export type BatchOfflineResult = components['schemas']['BatchOfflineResult']
+export type BatchOfflineItemStatus = BatchOfflineItemResult['result']  // 'offline' | 'already_offline' | 'not_found' | 'error'
+
 // 设备元数据
 export type DeviceProfile = components['schemas']['DeviceProfile']
 export type DevicePlatform = DeviceProfile['platform']

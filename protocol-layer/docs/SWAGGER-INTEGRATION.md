@@ -129,6 +129,51 @@ POST /v1/accounts/{accountId}/online
 - 必须请求 owner worker。
 - 可在 body 里带 `proxy`，不带则使用已绑定 proxy。
 - 返回 `202` 表示开始上线，最终状态看事件或 status。
+- 少量手动上线使用该接口；批量恢复不要并发打单账号 `/online`。
+
+批量上线：
+
+```http
+POST /v1/accounts/online/batch
+```
+
+请求体：
+
+```json
+{
+  "items": [
+    { "accountId": "acc_001" },
+    { "accountId": "acc_002" }
+  ],
+  "maxWaitMs": 60000
+}
+```
+
+响应里的 `results[]` 是当前 owner 本地处理结果，`remote[]` 是不属于当前 worker 的账号。业务层按 `remote[].ownerEndpoint` 分组后继续调用：
+
+```text
+POST {ownerEndpoint}/v1/accounts/online/batch
+```
+
+`results[].result=accepted` 只表示已发起上线，最终是否在线看 `account.state_changed` 或 status。`timeout` 按 `retryAfterMs` 退避重试，`proxy_required` 先补代理。
+
+批量下线：
+
+```http
+POST /v1/accounts/offline/batch
+```
+
+请求体：
+
+```json
+{
+  "accountIds": ["acc_001", "acc_002"],
+  "reason": "task_pause",
+  "maxWaitMs": 30000
+}
+```
+
+该接口只断开 socket，保留 creds / owner。响应里的 `remote[]` 同样按 `ownerEndpoint` 分组后继续调用 `POST {ownerEndpoint}/v1/accounts/offline/batch`。再次上线不需要重新授权。
 
 ### 5. 查询状态
 

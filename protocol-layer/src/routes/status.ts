@@ -22,6 +22,8 @@ export const registerStatusRoutes: RouteRegistrar = (app, ctx) => {
           connectionField: 'close',
           ageMs: Date.now() - Date.parse(runtime.updatedAt),
           keepAliveIntervalMs: ctx.config.worker.keepAliveIntervalMs,
+          keepAliveJitterMinMs: ctx.config.worker.keepAliveJitterMinMs,
+          keepAliveJitterMaxMs: ctx.config.worker.keepAliveJitterMaxMs,
           slotReleased: runtime.slotReleased,
           reason: runtime.reason,
           updatedAt: runtime.updatedAt

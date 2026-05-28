@@ -51,6 +51,14 @@ POST /v1/accounts/resolve
 
 普通协议请求如果返回 `409 NOT_OWNER`，业务层使用错误详情里的 `ownerEndpoint` 更新缓存并重试一次。不要每次业务操作都 resolve；resolve 只用于初始化、cache miss 和纠偏。
 
+`account.owner_assigned.data.reason` 当前可能值：
+
+- `pairing_code`: Pairing Code 首次授权分配。
+- `qr`: 二维码首次授权分配。
+- `import`: 导入账号时分配。
+- `online`: 单账号 `/online` 触发分配。
+- `batch_online`: 批量 `/online/batch` 触发分配。
+
 ## 导入与上线
 
 单账号导入：
@@ -90,6 +98,70 @@ POST /v1/accounts/resolve
 - 当前 worker 是 owner：返回 `IMPORTED_ONLINE` 或 `IMPORTED_OFFLINE`。
 - 当前 worker 不是 owner：返回 `ASSIGNED_REMOTE`，`data.routing.ownerEndpoint` 里有目标地址。
 - 业务层可按 `ownerEndpoint` 分组后补调 `/v1/accounts/{accountId}/online`。
+
+### 批量上线
+
+大批量账号恢复、主动下线后重新拉起、测试环境 2000 账号上线，不要并发打单账号 `/online`，统一调用：
+
+```text
+POST /v1/accounts/online/batch
+```
+
+请求示例：
+
+```json
+{
+  "items": [
+    { "accountId": "acc_001" },
+    { "accountId": "acc_002" }
+  ],
+  "maxWaitMs": 60000
+}
+```
+
+协议层处理语义：
+
+- 单次最多 `BATCH_ONLINE_MAX_SIZE`，默认 500。
+- 协议层先批量查 owner；当前 worker owner 的账号进入 OnlineGate 排队上线。
+- 已归属其他 worker 的账号不会由当前 worker 转发，响应放到 `remote[]`。
+- 未分配 owner 的账号会由协议层 assign；如果 assign 到其他 worker，也放到 `remote[]`。
+- `results[].result=accepted` 只表示已发起上线，最终是否 ONLINE 以 `account.state_changed` 为准。
+
+业务层处理 `remote[]`：
+
+1. 按 `remote[].ownerEndpoint` 分组。
+2. 对每个非空 endpoint 调 `POST {ownerEndpoint}/v1/accounts/online/batch`。
+3. 如果 `ownerEndpoint=null`，先调 `GET /v1/accounts/resolve/{accountId}` 纠偏；仍为空则延迟重试。
+4. 递归处理新的 `remote[]`，直到全部变成 owner 本地结果。
+
+单账号 `/online` 命中 OnlineGate 会返回 `429 ONLINE_LIMITED`，`details.reason` 可能是 `account_online_cooldown`、`node_online_limited`、`global_online_limited`。批量场景应改用 `/online/batch`，不要在业务层用高并发重试冲击协议层。
+
+### 批量下线
+
+功能层需要暂停一批账号、维护窗口释放在线容量时，调用：
+
+```text
+POST /v1/accounts/offline/batch
+```
+
+批量下线只断开 socket 并释放 worker runtime slot，不做 logout，不删除 creds/keys/proxy，不解除 Registry owner 绑定。后续再次 online/batch online 不需要重新授权。
+
+请求示例：
+
+```json
+{
+  "accountIds": ["acc_001", "acc_002"],
+  "reason": "task_pause",
+  "maxWaitMs": 30000
+}
+```
+
+业务层处理：
+
+1. `offline` 和 `already_offline` 都展示为离线。
+2. `remote[]` 按 `ownerEndpoint` 分组后调用 `POST {ownerEndpoint}/v1/accounts/offline/batch`。
+3. `not_found` 表示 Registry 没有 owner，可按业务展示未知或离线。
+4. 需要恢复时调用 `/v1/accounts/online/batch`。
 
 ## 在线容量口径
 
@@ -177,8 +249,15 @@ GET /v1/accounts/{accountId}/alive
 1. 优先使用功能层 owner cache。
 2. 对 cache miss 的账号批量 resolve。
 3. 按 ownerEndpoint 分组。
-3. 每个 ownerEndpoint 控制并发，避免单 worker 被业务侧瞬时打满。
-4. 对 `NOT_OWNER` 做一次刷新重试。
+4. 每个 ownerEndpoint 控制并发，避免单 worker 被业务侧瞬时打满。
+5. 对 `NOT_OWNER` 做一次刷新重试。
+
+批量上线任务：
+
+1. 按 `BATCH_ONLINE_MAX_SIZE` 切批，默认每批 500。
+2. 第一批可以打任意协议入口；协议层返回当前 worker 本地处理结果和 `remote[]`。
+3. 功能层按 `remote[].ownerEndpoint` 二次分发，不需要自己计算账号在哪个 worker。
+4. `accepted` 后等待 `account.state_changed ONLINE`；`timeout` 按 `retryAfterMs` 或业务退避重试；`proxy_required` 先补代理。
 
 ## 部署要求
 

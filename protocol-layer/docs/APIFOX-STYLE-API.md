@@ -558,9 +558,11 @@ POST /v1/accounts/import/batch
 
 ## 3. 账号生命周期
 
-### 3.1 上线账号
+### 3.1 上线账号（单个）
 
 **用途**：用已有 creds 建立 socket，不重新授权。
+
+**注意**：批量场景（如 2000 账号同时上线）必须用 **3.2 批量上线**，否则会触发 `ONLINE_LIMITED`。
 
 **请求方式**
 
@@ -591,7 +593,132 @@ POST /v1/accounts/{accountId}/online
 }
 ```
 
-### 3.2 手动离线
+**错误响应**
+
+- `400 PROXY_REQUIRED`：账号未绑代理且 body 未传
+- `409 NOT_OWNER`：当前 worker 不是账号 owner，看 `details.ownerEndpoint` 重发请求
+- `429 ONLINE_LIMITED`：上线限流命中，`details.reason` 见下表，`details.retryAfterMs` 告知重试间隔
+
+| reason | 含义 |
+|--------|------|
+| `account_online_cooldown` | 该账号刚上线过（5s 冷却） |
+| `node_online_limited` | 单节点 nodeOnlinePerSec 超限（默认 50/s） |
+| `global_online_limited` | 集群级 globalOnlinePerSec 超限（默认 200/s） |
+
+### 3.2 批量上线（推荐 — 2000 账号场景）
+
+**用途**：竞品级"主动下线后批量重新拉起"专用接口。
+
+协议层会：
+1. 批量解析 owner（hmget 单次），按 ownerEndpoint 分桶；
+2. 非本节点的账号在响应 `remote[]` 返回，业务侧分发到对应 endpoint 再调；
+3. 本节点的账号走 **OnlineGate 三层令牌桶**节奏化处理；
+4. 拿到令牌后异步并行 Noise 握手，event loop 不卡。
+
+**SLA**（4C8G 单节点）：2000 账号端到端 ~ 60-90s，对齐竞品 2 分钟 baseline。
+
+**请求方式**
+
+```http
+POST /v1/accounts/online/batch
+```
+
+**请求示例**
+
+```json
+{
+  "items": [
+    { "accountId": "acc_001" },
+    { "accountId": "acc_002", "proxy": { "protocol": "socks5", "url": "...", "sessionId": "acc_002", "country": "US" } },
+    { "accountId": "acc_003", "deviceProfile": { "platform": "windows", "manufacturer": "Microsoft", "model": "Windows PC" } }
+  ],
+  "maxWaitMs": 60000
+}
+```
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|-----|------|
+| `items[]` | array | ✓ | 1-500 个账号，超过返 400 |
+| `items[].accountId` | string | ✓ | |
+| `items[].proxy` | object |   | 不传则查 proxyStore，没绑过返 `proxy_required` |
+| `items[].deviceProfile` | object |   | 同 `/online` |
+| `items[].browserDisplay` | object |   | 同 `/online` |
+| `maxWaitMs` | number |   | 单账号在 OnlineGate 上的最长等待，默认 60s（最大 180s） |
+
+**响应示例**
+
+```json
+{
+  "requestedAt": "2026-05-28T10:00:00Z",
+  "elapsedMs": 62315,
+  "summary": {
+    "requested": 500,
+    "local": 480,
+    "remote": 20,
+    "accepted": 478,
+    "timeout": 2,
+    "proxyRequired": 0,
+    "error": 0
+  },
+  "results": [
+    { "accountId": "acc_001", "result": "accepted" },
+    { "accountId": "acc_999", "result": "timeout", "retryAfterMs": 5000 },
+    { "accountId": "acc_888", "result": "proxy_required", "error": "proxy binding missing" }
+  ],
+  "remote": [
+    {
+      "accountId": "acc_remote_1",
+      "ownerWorkerId": "node-b-w2",
+      "ownerEndpoint": "http://10.0.1.13:8082",
+      "note": "redispatch to ownerEndpoint"
+    }
+  ]
+}
+```
+
+**结果状态 `result`**
+
+| result | 含义 | 业务侧动作 |
+|--------|------|----------|
+| `accepted` | 已发起 Noise 握手 | 等 `account.state_changed` 事件确认 ONLINE |
+| `timeout` | OnlineGate 等待超时 | 间隔 `retryAfterMs` 后重试 |
+| `proxy_required` | 账号未绑代理 | 先调 `/v1/accounts/{id}/proxy/bind` |
+| `error` | 协议层异常 | 看 `error` 字段定位 |
+
+**业务侧典型用法**
+
+```ts
+async function batchOnlineAll(accountIds: string[], endpoint: string): Promise<void> {
+  const remaining = [...accountIds]
+  while (remaining.length > 0) {
+    const batch = remaining.splice(0, 500)
+    const res = await fetch(`${endpoint}/v1/accounts/online/batch`, {
+      method: 'POST',
+      body: JSON.stringify({ items: batch.map(accountId => ({ accountId })) })
+    }).then(r => r.json())
+
+    // 把 remote 部分按 ownerEndpoint 重新分发
+    const byEndpoint = new Map<string, string[]>()
+    for (const r of res.remote ?? []) {
+      if (!r.ownerEndpoint) continue
+      if (!byEndpoint.has(r.ownerEndpoint)) byEndpoint.set(r.ownerEndpoint, [])
+      byEndpoint.get(r.ownerEndpoint)!.push(r.accountId)
+    }
+    for (const [ep, ids] of byEndpoint) {
+      await batchOnlineAll(ids, ep)
+    }
+
+    // timeout 的下次重试
+    const retry = (res.results ?? [])
+      .filter((x: { result: string }) => x.result === 'timeout')
+      .map((x: { accountId: string }) => x.accountId)
+    remaining.push(...retry)
+    if (retry.length > 0) await new Promise(r => setTimeout(r, 5_000))
+  }
+}
+```
+
+### 3.3 手动离线
 
 **用途**：断开 socket，保留 creds，不占 active slot。
 
@@ -609,7 +736,67 @@ POST /v1/accounts/{accountId}/offline
 }
 ```
 
-### 3.3 Logout
+### 3.4 批量下线
+
+**用途**：批量断开 socket，释放 worker runtime slot，保留 creds / keys / proxy / owner 绑定。再次上线不需要重新授权。
+
+**请求方式**
+
+```http
+POST /v1/accounts/offline/batch
+```
+
+**请求示例**
+
+```json
+{
+  "accountIds": ["acc_001", "acc_002"],
+  "reason": "task_pause",
+  "maxWaitMs": 30000
+}
+```
+
+**响应示例**
+
+```json
+{
+  "requestedAt": "2026-05-28T12:00:00.000Z",
+  "elapsedMs": 1200,
+  "summary": {
+    "requested": 2,
+    "local": 1,
+    "remote": 1,
+    "offline": 1,
+    "alreadyOffline": 0,
+    "notFound": 0,
+    "error": 0
+  },
+  "results": [
+    { "accountId": "acc_001", "result": "offline" }
+  ],
+  "remote": [
+    {
+      "accountId": "acc_002",
+      "ownerWorkerId": "worker-002",
+      "ownerEndpoint": "http://10.0.1.13:8082",
+      "note": "redispatch to ownerEndpoint"
+    }
+  ]
+}
+```
+
+**结果状态**
+
+| result | 含义 | 功能层动作 |
+|--------|------|----------|
+| `offline` | 已断开 socket | 前端显示离线 |
+| `already_offline` | 已不在运行态或 slot 已释放 | 前端显示离线 |
+| `not_found` | Registry 未分配 owner | 显示未知/离线，按业务决定是否 resolve |
+| `error` | 协议层异常 | 延迟重试或排查 |
+
+`remote[]` 按 `ownerEndpoint` 分组后递归调用 `POST {ownerEndpoint}/v1/accounts/offline/batch`。
+
+### 3.5 Logout
 
 **用途**：退出设备、删除 creds、解除 Registry 绑定。
 
@@ -651,7 +838,9 @@ GET /v1/accounts/{accountId}/status
     "lastDateRecv": "2026-05-19T10:00:00.000Z",
     "lastPingAckAt": "2026-05-19T10:00:00.000Z",
     "ageMs": 100,
-    "keepAliveIntervalMs": 30000
+    "keepAliveIntervalMs": 17342,
+    "keepAliveJitterMinMs": 15000,
+    "keepAliveJitterMaxMs": 20000
   },
   "accountType": "UNKNOWN",
   "deviceProfile": {

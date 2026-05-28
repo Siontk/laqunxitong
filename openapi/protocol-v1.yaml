@@ -574,17 +574,113 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/OnlineResult' }
+        '429':
+          description: |
+            上线限流命中（OnlineGate 三层令牌桶）。`details.reason` 可能为：
+              - `account_online_cooldown`：单账号冷却中
+              - `node_online_limited`：单节点 nodeOnlinePerSec 超限
+              - `global_online_limited`：集群级 globalOnlinePerSec 超限
+            `details.retryAfterMs` 告知功能层多久后再试；批量上线建议改用 `/v1/accounts/online/batch`。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '400':
+          description: 缺少代理绑定 (`PROXY_REQUIRED`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/accounts/online/batch:
+    post:
+      tags: [lifecycle]
+      summary: 批量上线 — 单次最多 500 账号
+      description: |
+        竞品级"主动下线后批量重新拉起"专用接口。
+
+        协议层会：
+          1. 一次性批量解析所有 accountId 的 owner（hmget 单次），按 ownerEndpoint 分桶
+          2. 非本节点的部分在响应 `remote[]` 数组中返回，业务侧分发到对应 endpoint 再调
+          3. 本节点的部分通过 **OnlineGate 三层令牌桶**节奏化处理：
+             - 单账号冷却：`accountOnlineCooldownMs`（默认 5s）
+             - 单节点速率：`nodeOnlinePerSec`（默认 50/s）
+             - 集群级速率：`globalOnlinePerSec`（默认 200/s）
+          4. 拿到令牌后异步并行 Noise 握手，避免 libsignal CPU 同时打 2000 个握手卡死 event loop
+
+        **吞吐预估**（4C8G 单节点 × 50/s 闸门）：
+          - 2000 账号通过闸门 ~ 40s
+          - Noise 握手并行 + WA 接受 ~ 500ms-2s
+          - 端到端 ~ 60-90s 全部 ONLINE
+          - 对齐竞品 2 分钟 baseline
+
+        **失败处理**：
+          - `timeout`：token 等待超时（>= maxWaitMs），业务侧下次重试
+          - `proxy_required`：账号未绑代理且 body 没传，先调 /proxy/bind
+          - `error`：协议层异常，看 `error` 字段定位
+      operationId: batchOnlineAccounts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BatchOnlineBody' }
+      responses:
+        '200':
+          description: 批量上线请求处理完成（不代表全部成功，看 summary 与 results）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchOnlineResult' }
+        '400':
+          description: 参数错误 / 超出 batchOnlineMaxSize
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
 
   /v1/accounts/{accountId}/offline:
     post:
       tags: [lifecycle]
       summary: 主动下线，保留 creds
+      description: |
+        断开当前账号 socket，释放 worker runtime slot，保留 creds / keys / proxy / Registry owner 绑定。
+        后续再次调用 `/v1/accounts/{accountId}/online` 或 `/v1/accounts/online/batch` 不需要重新授权。
+        这不是 WhatsApp logout，也不会从已关联设备中移除。
       operationId: offlineAccount
       parameters:
         - $ref: '#/components/parameters/AccountIdPath'
       responses:
         '200':
           description: 已下线
+
+  /v1/accounts/offline/batch:
+    post:
+      tags: [lifecycle]
+      summary: 批量下线，保留 creds
+      description: |
+        批量断开账号 socket，释放 worker runtime slot，但保留 creds / keys / proxy / Registry owner 绑定。
+        该接口适合功能层暂停任务、维护窗口、批量释放在线容量。
+
+        协议层会先批量解析 owner：
+          - 当前 worker owner 的账号本地下线；
+          - 非本 worker owner 的账号放入 `remote[]`，功能层按 `ownerEndpoint` 分组后继续调用；
+          - 未分配 owner 的账号返回 `not_found`。
+
+        注意：批量下线不是 logout。再次上线不需要 Pairing Code / QR，除非账号已经进入
+        `NEED_REAUTH` / `LOGGED_OUT` / `DEVICE_REMOVED`。
+      operationId: batchOfflineAccounts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BatchOfflineBody' }
+      responses:
+        '200':
+          description: 批量下线请求处理完成（看 summary 与 results）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchOfflineResult' }
+        '400':
+          description: 参数错误 / 超出单批上限
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
 
   /v1/accounts/{accountId}/reconnect:
     post:
@@ -2292,7 +2388,12 @@ components:
         lastDateRecv: { type: string, format: date-time }
         lastPingAckAt: { type: string, format: date-time }
         ageMs: { type: integer }
-        keepAliveIntervalMs: { type: integer, example: 30000 }
+        keepAliveIntervalMs:
+          type: integer
+          example: 17342
+          description: 当前账号实际 socket keepalive 间隔；默认按 accountId 在 15000-20000ms 稳定打散
+        keepAliveJitterMinMs: { type: integer, example: 15000 }
+        keepAliveJitterMaxMs: { type: integer, example: 20000 }
         slotReleased:
           type: boolean
           description: true 表示该账号当前不占 worker 在线容量
@@ -2357,6 +2458,7 @@ components:
         - ACCOUNT_BUSY
         - WORKER_BUSY
         - RECONNECT_LIMITED
+        - ONLINE_LIMITED
         - UNKNOWN
 
     OnlineResult:
@@ -2373,6 +2475,191 @@ components:
           description: 本次 online 请求被协议层接收并完成本地状态同步的时间
         routing:
           $ref: '#/components/schemas/RoutingInfo'
+
+    BatchOnlineItem:
+      type: object
+      required: [accountId]
+      properties:
+        accountId: { type: string }
+        proxy:
+          $ref: '#/components/schemas/ProxyBinding'
+        deviceProfile:
+          $ref: '#/components/schemas/DeviceProfile'
+        browserDisplay:
+          $ref: '#/components/schemas/BrowserDisplay'
+
+    BatchOnlineBody:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items: { $ref: '#/components/schemas/BatchOnlineItem' }
+          description: 单次最多 500 个，超过返回 400（按 rateLimit.batchOnlineMaxSize 配置）
+        maxWaitMs:
+          type: integer
+          minimum: 1000
+          maximum: 180000
+          default: 60000
+          description: |
+            单账号在 OnlineGate 三层令牌桶上的最长等待。超时账号返回 `timeout`，
+            业务侧下次重试。默认 60s，2000 账号在 50/s 节奏下 40s 完成排队，留 20s 余量。
+
+    BatchOnlineItemResult:
+      type: object
+      required: [accountId, result]
+      properties:
+        accountId: { type: string }
+        result:
+          type: string
+          enum: [accepted, timeout, proxy_required, error]
+          description: |
+            - `accepted`: 已经发起 Noise 握手，最终状态等 account.state_changed 事件
+            - `timeout`: 超过 maxWaitMs 还没拿到上线令牌
+            - `proxy_required`: 账号未绑代理且 body 未传
+            - `error`: 协议层异常，看 `error` 字段
+        retryAfterMs:
+          type: integer
+          nullable: true
+        error:
+          type: string
+          nullable: true
+
+    BatchOnlineRemoteItem:
+      type: object
+      required: [accountId, ownerWorkerId, ownerEndpoint, note]
+      properties:
+        accountId: { type: string }
+        ownerWorkerId: { type: string }
+        ownerEndpoint:
+          type: string
+          nullable: true
+        note:
+          type: string
+          example: redispatch to ownerEndpoint
+
+    BatchOnlineSummary:
+      type: object
+      required: [requested, local, remote, accepted, timeout, proxyRequired, error]
+      properties:
+        requested: { type: integer }
+        local: { type: integer, description: 本节点持有 owner 的账号数 }
+        remote: { type: integer, description: 非本节点 owner，需业务侧再分发 }
+        accepted: { type: integer }
+        timeout: { type: integer }
+        proxyRequired: { type: integer }
+        error: { type: integer }
+
+    BatchOnlineResult:
+      type: object
+      required: [requestedAt, elapsedMs, summary, results, remote]
+      properties:
+        requestedAt:
+          type: string
+          format: date-time
+        elapsedMs:
+          type: integer
+          description: 本次批量请求从入口到响应的端到端耗时
+        summary:
+          $ref: '#/components/schemas/BatchOnlineSummary'
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/BatchOnlineItemResult' }
+          description: 本节点 owner 的账号逐个结果
+        remote:
+          type: array
+          items: { $ref: '#/components/schemas/BatchOnlineRemoteItem' }
+          description: |
+            非本节点 owner 的账号清单。业务侧按 ownerEndpoint 分组后递归调
+            `POST {ownerEndpoint}/v1/accounts/online/batch`，直到全部本地完成。
+
+    BatchOfflineBody:
+      type: object
+      required: [accountIds]
+      properties:
+        accountIds:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items: { type: string }
+          description: 单次最多 500 个账号
+        reason:
+          type: string
+          enum: [manual, task_pause, batch_pause, maintenance]
+          default: manual
+          description: 本次批量下线原因，仅用于审计和功能层展示
+        maxWaitMs:
+          type: integer
+          minimum: 1000
+          maximum: 60000
+          default: 30000
+          description: 预留 SLA 字段；当前本地下线为即时操作，远端账号通过 remote[] 交给功能层分发
+
+    BatchOfflineItemResult:
+      type: object
+      required: [accountId, result]
+      properties:
+        accountId: { type: string }
+        result:
+          type: string
+          enum: [offline, already_offline, not_found, error]
+          description: |
+            - `offline`: 已断开 socket 并释放 runtime slot
+            - `already_offline`: 已经不在 worker 运行态或 runtime 已释放
+            - `not_found`: Registry 未分配 owner
+            - `error`: 协议层异常，看 `error`
+        error:
+          type: string
+          nullable: true
+
+    BatchOfflineRemoteItem:
+      type: object
+      required: [accountId, ownerWorkerId, ownerEndpoint, note]
+      properties:
+        accountId: { type: string }
+        ownerWorkerId: { type: string }
+        ownerEndpoint:
+          type: string
+          nullable: true
+        note:
+          type: string
+          example: redispatch to ownerEndpoint
+
+    BatchOfflineSummary:
+      type: object
+      required: [requested, local, remote, offline, alreadyOffline, notFound, error]
+      properties:
+        requested: { type: integer }
+        local: { type: integer, description: 本节点持有 owner 的账号数 }
+        remote: { type: integer, description: 非本节点 owner，需功能层再分发 }
+        offline: { type: integer }
+        alreadyOffline: { type: integer }
+        notFound: { type: integer }
+        error: { type: integer }
+
+    BatchOfflineResult:
+      type: object
+      required: [requestedAt, elapsedMs, summary, results, remote]
+      properties:
+        requestedAt:
+          type: string
+          format: date-time
+        elapsedMs:
+          type: integer
+        summary:
+          $ref: '#/components/schemas/BatchOfflineSummary'
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/BatchOfflineItemResult' }
+          description: 本节点 owner 账号和未分配账号的逐条结果
+        remote:
+          type: array
+          items: { $ref: '#/components/schemas/BatchOfflineRemoteItem' }
+          description: |
+            非本节点 owner 的账号清单。功能层按 ownerEndpoint 分组后递归调
+            `POST {ownerEndpoint}/v1/accounts/offline/batch`。
 
     ReconnectBody:
       type: object
@@ -3761,7 +4048,7 @@ webhooks:
 
   account.heartbeat:
     post:
-      summary: 稳态心跳（30s/次）
+      summary: 账号级 Kafka 心跳（默认关闭；开启后默认 300s/次）
       requestBody:
         content:
           application/json:
@@ -3807,7 +4094,7 @@ webhooks:
                 ownerWorkerId: { type: string }
                 ownerEndpoint: { type: string, nullable: true }
                 currentWorkerId: { type: string }
-                reason: { type: string, enum: [pairing_code, qr, import, online] }
+                reason: { type: string, enum: [pairing_code, qr, import, online, batch_online] }
                 assignedAt: { type: string, format: date-time }
 
   account.owner_changed:
@@ -3844,7 +4131,7 @@ webhooks:
                 previousOwnerEndpoint: { type: string, nullable: true }
                 currentWorkerId: { type: string, nullable: true }
                 releaseSlot: { type: boolean, nullable: true }
-                reason: { type: string, enum: [admin_unassign, failover_no_live_worker, failover_no_capacity] }
+                reason: { type: string, enum: [admin_unassign, failover_no_live_worker, failover_no_capacity, failover_reassign_failed] }
                 unassignedAt: { type: string, format: date-time }
 
   account.restricted:

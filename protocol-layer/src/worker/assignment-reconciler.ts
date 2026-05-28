@@ -129,7 +129,7 @@ export class AssignmentReconciler {
 
         this.deps.logger.info({ accountId }, 'adopting assigned account')
         try {
-          await this.deps.accounts.online(accountId, proxy)
+          await this.deps.accounts.online(accountId, proxy, undefined, undefined, 'reconciler')
           adopted++
           if (adoptInterval > 0 && adopted < batchSize) {
             await new Promise(r => setTimeout(r, adoptInterval))

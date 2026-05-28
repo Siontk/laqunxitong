@@ -17,7 +17,7 @@ import { createMetrics, type Metrics } from './observability/metrics.js'
 import { registerHealthRoutes } from './observability/health.js'
 import { registerErrorHandler } from './error/error-handler.js'
 import { createEventPublisher, type EventPublisher } from './events/publisher.js'
-import { createRedis, RedisStoreAdapter } from './store/adapters/redis.js'
+import { attachRedisGuards, createRedis, RedisStoreAdapter } from './store/adapters/redis.js'
 import { MemoryStoreAdapter } from './store/adapters/memory.js'
 import { MySqlStoreAdapter, createMySqlPool } from './store/adapters/mysql.js'
 import type { StoreAdapter } from './store/adapters/types.js'
@@ -35,6 +35,7 @@ import { Registry } from './registry/registry.js'
 import { Master } from './registry/master.js'
 import { TokenBucketReconnectGate } from './rate-limit/reconnect-limiter.js'
 import { OperationGate } from './rate-limit/operation-gate.js'
+import { OnlineGate } from './rate-limit/online-limiter.js'
 import { AccountManager } from './worker/account-manager.js'
 import { StaleDetector } from './worker/stale-detector.js'
 import { AssignmentReconciler } from './worker/assignment-reconciler.js'
@@ -48,11 +49,28 @@ async function main(): Promise<void> {
   logger.info({ role: config.role, nodeId: config.nodeId, workerId: config.workerId }, 'starting protocol-layer')
 
   // ── 依赖装配 ──
-  const redis = createRedis(config.redis.url, config.redis.db)
-  const registryRedis = config.redis.registryUrl ? createRedis(config.redis.registryUrl, config.redis.db) : redis
-  const keysRedis = config.redis.keysUrl ? createRedis(config.redis.keysUrl, config.redis.db) : redis
-  const rateLimitRedis = config.redis.rateLimitUrl ? createRedis(config.redis.rateLimitUrl, config.redis.db) : redis
-  const runtimeRedis = config.redis.runtimeUrl ? createRedis(config.redis.runtimeUrl, config.redis.db) : redis
+  const redisOpts = {
+    commandTimeoutMs: config.redis.commandTimeoutMs,
+    maxRetriesPerRequest: config.redis.maxRetriesPerRequest,
+    maxOfflineQueueSize: config.redis.maxOfflineQueueSize,
+    connectTimeoutMs: config.redis.connectTimeoutMs
+  }
+  const redis = createRedis(config.redis.url, config.redis.db, redisOpts)
+  const registryRedis = config.redis.registryUrl ? createRedis(config.redis.registryUrl, config.redis.db, redisOpts) : redis
+  const keysRedis = config.redis.keysUrl ? createRedis(config.redis.keysUrl, config.redis.db, redisOpts) : redis
+  const rateLimitRedis = config.redis.rateLimitUrl ? createRedis(config.redis.rateLimitUrl, config.redis.db, redisOpts) : redis
+  const runtimeRedis = config.redis.runtimeUrl ? createRedis(config.redis.runtimeUrl, config.redis.db, redisOpts) : redis
+
+  // Redis 客户端错误监控（任一实例 error 都打 warn + 计 metric）
+  const redisErrorHandler = (err: Error, name: string): void => {
+    logger.warn({ err: err.message, instance: name }, 'redis client error')
+    metrics.redisClientErrorTotal.inc({ instance: name })
+  }
+  attachRedisGuards(redis, 'default', config.redis.maxOfflineQueueSize, redisErrorHandler)
+  if (registryRedis !== redis) attachRedisGuards(registryRedis, 'registry', config.redis.maxOfflineQueueSize, redisErrorHandler)
+  if (keysRedis !== redis) attachRedisGuards(keysRedis, 'keys', config.redis.maxOfflineQueueSize, redisErrorHandler)
+  if (rateLimitRedis !== redis) attachRedisGuards(rateLimitRedis, 'ratelimit', config.redis.maxOfflineQueueSize, redisErrorHandler)
+  if (runtimeRedis !== redis) attachRedisGuards(runtimeRedis, 'runtime', config.redis.maxOfflineQueueSize, redisErrorHandler)
   await Promise.all([
     redis.ping(),
     registryRedis.ping(),
@@ -74,20 +92,31 @@ async function main(): Promise<void> {
 
   const publisher = await createEventPublisher(config, metrics, logger)
 
-  // L1
-  const credsL1 = new MemoryStoreAdapter<Record<string, unknown>>(50_000)
-  const keysL1 = new MemoryStoreAdapter<Record<string, unknown>>(500_000)
+  // L1（配置化：4C8G × 4 worker 默认 50k creds + 200k keys，每 worker ~ 250MB L1 内存预算）
+  const credsL1 = new MemoryStoreAdapter<Record<string, unknown>>(config.worker.credsL1Size)
+  const keysL1 = new MemoryStoreAdapter<Record<string, unknown>>(config.worker.keysL1Size)
   // L2
   const credsL2 = new RedisStoreAdapter<Record<string, unknown>>(redis, config.redis.keyPrefix)
   const keysL2 = new RedisStoreAdapter<Record<string, unknown>>(keysRedis, config.redis.keyPrefix)
   // L3
   let credsL3: StoreAdapter<Record<string, unknown>> | undefined
   if (config.mysql.enabled) {
-    const mysqlPool = createMySqlPool(config.mysql.connectionUri)
+    const mysqlPool = createMySqlPool(config.mysql.connectionUri, {
+      connectionLimit: config.mysql.connectionLimit,
+      maxIdle: config.mysql.maxIdle,
+      idleTimeoutMs: config.mysql.idleTimeoutMs,
+      connectTimeoutMs: config.mysql.connectTimeoutMs
+    })
     const mysqlStore = new MySqlStoreAdapter<Record<string, unknown>>(mysqlPool, 'creds_store')
     await mysqlStore.ensureSchema()
     credsL3 = mysqlStore
-    logger.info('mysql L3 connected')
+    logger.info(
+      {
+        connectionLimit: config.mysql.connectionLimit,
+        maxIdle: config.mysql.maxIdle
+      },
+      'mysql L3 connected'
+    )
   }
 
   const credsStore = new CredsStore({ l1: credsL1, l2: credsL2, l3: credsL3, metrics, logger })
@@ -111,6 +140,7 @@ async function main(): Promise<void> {
 
   const gate = new TokenBucketReconnectGate(config, rateLimitRedis, logger)
   const operationGate = new OperationGate({ redis: rateLimitRedis, config, logger, metrics, publisher })
+  const onlineGate = new OnlineGate(config, rateLimitRedis, logger)
   const accounts = new AccountManager({
     config,
     logger,
@@ -231,10 +261,15 @@ async function main(): Promise<void> {
   })
   await app.register(SwaggerUi, { routePrefix: '/docs' })
 
+  // 进程级 shutdown 标志 — uncaughtException 触发后，readyz 立即返 false
+  // 让前置 LB 在 graceful window 期间停止分流量
+  let isShuttingDown = false
+
   registerErrorHandler(app, logger)
   registerHealthRoutes(app, {
     logger,
     isReady: async () => {
+      if (isShuttingDown) return false
       const r = await redis.ping().then(() => true).catch(() => false)
       const rr = await registryRedis.ping().then(() => true).catch(() => false)
       const kr = await keysRedis.ping().then(() => true).catch(() => false)
@@ -242,7 +277,7 @@ async function main(): Promise<void> {
       const tr = await runtimeRedis.ping().then(() => true).catch(() => false)
       return r && rr && kr && lr && tr && publisher.isReady()
     },
-    isLive: async () => true
+    isLive: async () => !isShuttingDown
   })
 
   // Prometheus
@@ -270,6 +305,7 @@ async function main(): Promise<void> {
     publisher,
     operationGate,
     reconnectGate: gate,
+    onlineGate,
     accounts,
     registry,
     credsStore,
@@ -309,12 +345,48 @@ async function main(): Promise<void> {
   }
   process.on('SIGTERM', () => void shutdown('SIGTERM'))
   process.on('SIGINT', () => void shutdown('SIGINT'))
+
+  /**
+   * uncaughtException 处理策略（单点环境优化）：
+   *
+   * 默认 Node 行为：进程立刻 exit。在 PM2 / k8s 拉起前会丢失 in-flight 状态。
+   *
+   * 我们的策略：
+   *   1. 记录到日志 + metric（不掩盖错误，便于排查）
+   *   2. 给定一个 graceful window（默认 10s），让 in-flight 请求处理完
+   *   3. 期间所有 /readyz 返回 503，前置 LB 不再分流量
+   *   4. window 结束后再调 shutdown（注销 worker、关 publisher、quit Redis）
+   *   5. 最后 exit(1) 让 PM2 / k8s 重启
+   *
+   * 注：极少数 fatal 错误（如 V8 内部 panic）会绕过这套，直接 exit。那种就靠 PM2 兜底。
+   */
+  let inUncaughtRecovery = false
+  const fatalRecover = async (kind: 'uncaught' | 'unhandled', err: unknown): Promise<void> => {
+    metrics.uncaughtErrorTotal.inc({ kind })
+    if (inUncaughtRecovery) {
+      logger.fatal({ err, kind }, 'second fatal during recovery — exit immediately')
+      process.exit(1)
+    }
+    inUncaughtRecovery = true
+    logger.fatal({ err, kind }, 'fatal error — entering graceful drain (10s)')
+    // 标记 not ready：前置 LB 不再分新流量
+    isShuttingDown = true
+    setTimeout(() => {
+      shutdown(`fatal:${kind}`)
+        .catch(shutdownErr => {
+          logger.error({ shutdownErr }, 'shutdown during fatal failed')
+          process.exit(1)
+        })
+    }, 10_000).unref()
+  }
   process.on('uncaughtException', err => {
-    logger.fatal({ err }, 'uncaughtException')
-    shutdown('uncaught').catch(() => process.exit(1))
+    fatalRecover('uncaught', err).catch(() => process.exit(1))
   })
   process.on('unhandledRejection', err => {
-    logger.error({ err }, 'unhandledRejection')
+    // unhandled rejection 不立即 fatal — 只记日志 + metric
+    // （Node 22+ 默认会 crash，但我们要让进程在 PM2 拉起前 graceful 一下）
+    metrics.uncaughtErrorTotal.inc({ kind: 'unhandled' })
+    logger.error({ err }, 'unhandledRejection (logged, not fatal)')
   })
 }
 

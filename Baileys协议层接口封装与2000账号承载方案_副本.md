@@ -44,7 +44,7 @@ Java 业务服务负责：
         v
 Java 业务服务
         |
-        | HTTP/gRPC/NATS
+        | HTTP/gRPC/Kafka
         v
 Node Baileys 协议节点集群
         |
@@ -469,7 +469,7 @@ IP 是按流量计费，所以**流量本身是头号成本**，必须有专门�
 
 ### 3.9 事件订阅协议（统一对外推送）
 
-协议层 → 业务层 / Java 的所有异步事件统一通过 NATS subject 推送。**事件 schema 必须稳定，且 payload 必带 evidence/occurredAt**。
+协议层 → 业务层 / Java 的所有异步事件统一通过 Kafka topic 推送。**事件 schema 必须稳定，且 payload 必带 evidence/occurredAt**。
 
 | 事件 | 频率 | 关键字段 | 触发场景 |
 |---|---|---|---|
@@ -507,7 +507,7 @@ IP 是按流量计费，所以**流量本身是头号成本**，必须有专门�
 }
 ```
 
-NATS subject 命名建议：`unsea.v1.events.{eventType}`（替代 malaixiya 的 `LOSTLINE_SUBJECT_NAME_PREFIX + 101` 这种神秘前缀）。
+Kafka topic 命名建议：`protocol.{domain}.events.v1`，message key 固定使用 `accountId`，保证同账号事件落到同一 partition。
 
 ## 4. 4C8G 单机 2000 账号怎么做
 
@@ -1298,8 +1298,8 @@ account.stale_detected    STALE 触发时推（用于监控/告警，业务可�
 | `message.received` | < 500ms | 是（业务侧入库） |
 
 实现要点：
-- 关键事件（need_reauth / restricted / proxy_failed / message.received）走 NATS JetStream 或 Kafka，**带 ack 重投**
-- heartbeat 走普通 NATS（容忍丢失，但连续 60s 缺失 = worker dead）
+- 关键事件（need_reauth / restricted / proxy_failed / message.received）走 Kafka，producer `acks=all`，消费侧按 offset / 幂等键确认
+- 账号级 heartbeat 默认关闭或低频发布；worker 健康由 Registry heartbeat 判断
 - 所有事件必须带 `occurredAt` 和 `workerId`，业务层用于乱序检测和归因
 
 #### 4.8.6 调优 checklist（上线前必查）
@@ -1320,7 +1320,7 @@ account.stale_detected    STALE 触发时推（用于监控/告警，业务可�
 □ NEED_REAUTH 不在协议层自动发 pairing
 □ 所有上报事件带 evidence + occurredAt + workerId
 □ Prometheus /metrics 暴露：reconnect_count / stale_count / event_loop_lag / rss_bytes
-□ 关键事件走 JetStream/Kafka，heartbeat 走普通 NATS
+□ 关键事件走 Kafka，账号级 heartbeat 默认关闭或低频发布
 ```
 
 ## 5. Baileys 是否可以做到 2000 账号能力
@@ -1525,7 +1525,7 @@ P3：频道、动态、扩展能力
 入口：`unsea-receive-service/.../NatsServerListener.java::lostline()` (line 829)，重登在 `sendSmsLoginEvent()` (line 1341)。
 
 ```text
-协议层 → NATS 发掉线事件 type=101
+协议层 → Kafka 发掉线事件 type=101
   ↓
 lostline() 按 offLineType 分流：
   -2 / -4 / -5 / -6 / -9 / -10   → byCategoryUpline 队列，记录后自动上线
@@ -1533,7 +1533,7 @@ lostline() 按 offLineType 分流：
   其他                             → DEFAULT_AUTO_UPLINE 默认队列，走自动上线
   ↓
 sendSmsLoginEvent(account):
-  - 查账号绑定的 NATS 节点（RequestNatsUsableDataByAccount）
+  - 查账号绑定的 Kafka 节点（RequestNatsUsableDataByAccount）
   - 查 http token（RequestHttpTokenByAccount）
   - 查当前代理（getCurrentIpManageId → RequestProxyByProtocol.requestIpManage）
   - 如果 redis key today_offline_account:{phone} 存在 或 当前代理拿不到
@@ -1581,7 +1581,7 @@ sendSmsLoginEvent(account):
 
 如果连带 Java 业务层一起重写：
 
-- NATS 总线、token/proxy/nats 查询微服务、IpManage 表、审计表、运营接口——这些**和重连模型无关**的代码占比超过 70%，重写零收益、纯粹增加工期
+- Kafka 总线、token/proxy 查询微服务、IpManage 表、审计表、运营接口——这些**和重连模型无关**的代码占比超过 70%，重写零收益、纯粹增加工期
 - 数据迁移、灰度兼容、运营接口契约变更，每一项都是工程灾难
 - 估算工期至少翻 3 倍，且回归风险极高
 
@@ -1594,7 +1594,7 @@ sendSmsLoginEvent(account):
 - 协议层管 ws socket 生命周期、creds、重连、加解密——这部分模型必须按 Baileys 重新建立，旧代码没有任何可复用的设计
 - 业务层管账号、任务、IP 池、审计、运营——这部分大量逻辑是业务无关的"管账号 / 派任务 / 记日志"，本来就和具体协议解耦良好
 
-把边界划在"协议层 ↔ NATS 消息总线"这个接缝处，**协议层重写、业务层增量演进**，是工程最优解。
+把边界划在"协议层 ↔ Kafka 消息总线"这个接缝处，**协议层重写、业务层增量演进**，是工程最优解。
 
 ### 10.3 完整决策表：复用 / 改造 / 丢弃 三档分类
 
@@ -1603,7 +1603,7 @@ sendSmsLoginEvent(account):
 | # | 模块 / 机制 | 分类 | 处理动作 | 对应新方案 |
 |---|---|---|---|---|
 | **A. 完全复用（不动）** ||||
-| 1 | NATS 消息总线（topic、subject 命名规范） | 完全复用 | 不动 | § 2 总体架构 |
+| 1 | Kafka 消息总线（topic、subject 命名规范） | 完全复用 | 不动 | § 2 总体架构 |
 | 2 | `RequestNatsUsableDataByAccount` / `RequestHttpTokenByAccount` / `RequestProxyByProtocol` 查询微服务 | 完全复用 | 不动，调用方改成 Registry | § 2 |
 | 3 | 超链业务校验本身（`buildValidBean` / `sendSslk`） | 完全复用 | 业务校验逻辑不变 | § 10.5 第二步 |
 | 4 | 账号管理表 / 运营接口 / 后台 UI | 完全复用 | 仅加字段，不改 API | § 10.3 改造复用 ↓ |
@@ -1614,7 +1614,7 @@ sendSmsLoginEvent(account):
 | 8 | 审计表 `t_ws_lostline_data` | 改造复用 | 留痕用；新增 `semantic`、`evidence`、`raw_code`、`raw_reason` 字段；不再驱动重登 | § 10.4 错误码映射 |
 | 9 | 审计表 `t_hyperlink_lost_line_task` | 改造复用 | 改语义为"长时间不可用工单"，`processNum` 改为最终兜底重试计数；不再做"先下线再上线" | § 10.5 第二步 |
 | 10 | `HyperlinkTaskController` 入口路由 | 改造复用 | URL 保留，内部实现重写：等协议层报 ONLINE + evidence 新鲜 → 再发校验 | § 10.5 第二步 |
-| 11 | 事件驱动模型（NATS push 掉线 type=101） | 改造复用 | topic 名保留兼容，payload 改用语义码 + evidence，不再用 offLineType 整数 | § 10.4 |
+| 11 | 事件驱动模型（Kafka push 掉线 type=101） | 改造复用 | topic 名保留兼容，payload 改用语义码 + evidence，不再用 offLineType 整数 | § 10.4 |
 | 12 | 任务表"最大重试 + status 流转"模式 | 改造复用 | 模式保留，重试次数按错误类型分级（A 立即/B 退避/C 不重试） | § 4.5 |
 | 13 | Redis cache 思路 | 改造复用 | key 模型重写，由 Registry 维护权威状态；Redis 只做读写缓存，不再承载"上下文"语义 | § 4.7 + Registry |
 | 14 | 任务表 schema（DDL 模式） | 改造复用 | 表结构保留，按新方案加 evidence 字段 | § 4.7 |
@@ -1706,8 +1706,8 @@ malaixiya 用 `offLineType` 整数码做分流，新方案要把这套整数码�
 | 阶段 | 在线 concurrent | 累计注册 | 性质 | 工期估 |
 |---|---|---|---|---|
 | Phase 0 | ≤ 1k | - | 内部验证，Baileys 7.x + Rust bridge 稳定性、creds 持久化、IP 轮换闭环 | 1-2 月 |
-| Phase 1 | 1 万 | 1-3 万 | 单 region、单 NATS 集群、单 Redis cluster；§ 4 设计直接放大 5 倍 | 1 月 |
-| Phase 2 | 10 万 | 10-30 万 | 必须引入 Registry、分片、冷热分层；多 NATS / Kafka 二选一 | 2-3 月 |
+| Phase 1 | 1 万 | 1-3 万 | 单 region、单 Kafka 集群、单 Redis cluster；§ 4 设计直接放大 5 倍 | 1 月 |
+| Phase 2 | 10 万 | 10-30 万 | 必须引入 Registry、分片、冷热分层；Kafka topic/partition 分流 | 2-3 月 |
 | Phase 3 | 50 万 | 50-150 万 | 多 region、跨机房 creds 复制、多供应商 IP 池、Redis cluster 多分片 | 3-4 月 |
 | Phase 4 | 100 万 | 100-300 万 | 高风险区，必须有 Plan B 替代方案；评估自研协议或商业 WA Business API 混合 | 6 月+ |
 
@@ -1728,7 +1728,7 @@ malaixiya 用 `offLineType` 整数码做分流，新方案要把这套整数码�
 #### Phase 1：1 万 concurrent
 
 - **节点**：5-7 台 4C8G，每台 5-6 worker × 300-400 账号 ≈ 1500-2000/台
-- **NATS**：单集群足够，按 § 2 总线
+- **Kafka**：单集群足够，按 § 2 总线
 - **Redis**：单 cluster（3 主 3 从），承担 L2 keys + 重连令牌桶 + Registry 状态
 - **PG**：单实例 + 备库，存 creds（10k × 100KB ≈ 1GB，毫无压力）
 - **IP**：10k × 平均 3 账号共享 ≈ **3.3k session**，月成本 $7k 量级
@@ -1738,7 +1738,7 @@ malaixiya 用 `offLineType` 整数码做分流，新方案要把这套整数码�
 #### Phase 2：10 万 concurrent
 
 - **节点**：50-70 台 4C8G。开始要按"机柜/可用区"分组部署
-- **NATS**：单集群已是瓶颈，考虑 NATS JetStream 集群或换 Kafka
+- **Kafka**：单集群开始成为瓶颈，按 topic/partition 分流并扩 broker
 - **Redis**：必须分 cluster——**1 套 keys cluster + 1 套 Registry cluster + 1 套限流 cluster**。不能再合一个
 - **PG**：creds 表 ~10GB，PG 主从足够；keys 全量在 Redis，每天数十亿次写
 - **存储分层**：开始引入**冷热分层**——长期 OFFLINE 账号 creds 推到对象存储，激活时拉回
@@ -1752,7 +1752,7 @@ malaixiya 用 `offLineType` 整数码做分流，新方案要把这套整数码�
 
 - **节点**：250-350 台。**必须多 region 部署**（按账号 country/ASN 就近落地）
 - **跨 region**：creds 通过对象存储跨 region 异步复制（账号漂移时只需从对象存储拉回）
-- **消息总线**：Kafka 多集群 + cross-region MirrorMaker，或 NATS supercluster
+- **消息总线**：Kafka 多集群 + cross-region MirrorMaker
 - **Redis**：keys cluster 分多套（按 region），单套 Redis cluster 撑不动 500 亿次/天的 ratchet 写
 - **PG**：creds 表分库分表（按 accountId hash），单库 < 50GB
 - **审计**：MySQL/PG 撑不住高频写，迁 **ClickHouse**（重连事件、状态变迁、proxy rotation 全部走 CH）
@@ -2060,7 +2060,7 @@ COLD    > 7 天 OFFLINE + creds 在对象存储 + keys 已 archive
 | `message-capping.update` | `account.new_chat_capping` | ☐ | § 3.7.2 |
 | `newsletter.update` | （业务侧按需订阅） | ☐ |  |
 
-#### 协议层自己发出的业务事件（NATS subject `unsea.v1.events.*`，19 个）
+#### 协议层自己发出的业务事件（Kafka topic `protocol.*.events.v1`，19 个）
 
 | # | 事件 | 域 | 状态 | 备注 |
 |---|---|---|---|---|
@@ -2141,7 +2141,7 @@ COLD    > 7 天 OFFLINE + creds 在对象存储 + keys 已 archive
 | # | 项 | 负责方 |
 |---|---|---|
 | 12 | Registry 主备 leader election 改用 etcd（替代 Redis 锁，强一致更可靠） | 协议层 |
-| 13 | NATS JetStream 拆为 keys cluster / Registry cluster / 限流 cluster 三套独立 | 协议层 + Ops |
+| 13 | Redis 拆为 keys cluster / Registry cluster / 限流 cluster 三套独立 | 协议层 + Ops |
 | 14 | 冷热分层（HOT/WARM/COLD）+ 长期 OFFLINE 账号归档到对象存储 | 协议层 |
 | 15 | 一致性 hash 分片（accountId → 虚拟节点环 → worker），平滑扩缩容 | 协议层 |
 | 16 | KeysStore 按 region 分 Redis cluster | 协议层 + Ops |
@@ -2165,6 +2165,5 @@ COLD    > 7 天 OFFLINE + creds 在对象存储 + keys 已 archive
 | Python / Go thin client | 未做 | Phase 3+，工具/PoC 需要时再说 |
 
 **所有 SDK 由 OpenAPI spec 一键生成，protocol-layer 不维护**。spec 更新后跑 `openapi/regenerate-types.sh`，业务侧重生 SDK 即可。
-
 
 

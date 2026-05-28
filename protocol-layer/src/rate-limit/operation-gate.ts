@@ -110,9 +110,13 @@ export class OperationGate {
       }
 
       const started = Date.now()
+      this.deps.metrics.groupOpInflight.inc()
+      let outcome: 'success' | 'partial' | 'error' = 'success'
       try {
         const result = await fn()
         if (isGateHoldResult(result)) {
+          // holdLockUntilTtl=true 通常是 participant add 超时 → 算 partial
+          if (result.holdLockUntilTtl) outcome = 'partial'
           releaseLock = !result.holdLockUntilTtl
           if (result.holdLockUntilTtl) {
             this.deps.logger.warn(
@@ -129,11 +133,19 @@ export class OperationGate {
           return result.value
         }
         return result
+      } catch (err) {
+        outcome = 'error'
+        throw err
       } finally {
         const elapsedMs = Date.now() - started
+        this.deps.metrics.groupOpInflight.dec()
+        this.deps.metrics.groupOpDurationSec.observe(
+          { operation, result: outcome },
+          elapsedMs / 1000
+        )
         if (elapsedMs >= this.deps.config.log.slowOperationMs) {
           this.deps.logger.warn(
-            { audit: true, action: 'groupop.slow', accountId, operation, elapsedMs },
+            { audit: true, action: 'groupop.slow', accountId, operation, elapsedMs, outcome },
             'business audit'
           )
         }

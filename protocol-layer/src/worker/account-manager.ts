@@ -56,15 +56,37 @@ interface AccountContext {
   proxy: ProxyBinding
   proxyAgents: ProxyAgents | null
   sock: WASocket | null
-  detachEventBridge: (() => void) | null
+  /**
+   * 当前 socket 上挂的所有 listener 的解绑函数。
+   * 每次 openSocket 重新填充；cleanupSocket 时全部跑一遍并清空。
+   *
+   * 关键点：旧版只 detach event-bridge，把 `creds.update` 和 `connection.update`
+   * 的 handler 留在 sock 上，导致 offline/logout 后 sock.end() 触发的 close 事件
+   * 会继续走 handleConnectionUpdate，产生 metric 漂移和"已删除账号被重新调度
+   * reconnect"的 bug。现在统一收 detach 到这个数组里。
+   */
+  detachers: Array<() => void>
   state: StateMachine
   lastDateRecv: number
   lastPingAckAt: number
+  keepAliveIntervalMs: number
   wsOpenedAt: number
   detection: BusinessDetection | null
   vipHint?: boolean
   browser?: SocketBrowser
   pairingTimer: NodeJS.Timeout | null
+  /**
+   * 标记账号正在被主动终结（offline / logout / pairing_timeout）。
+   * 一旦置 true，handleConnectionUpdate 收到的 close 事件直接 return，
+   * 不再做 publishStateChange / reconnect.schedule。
+   * 用来兜底"sock.end() 异步触发 close → handler 在 detach 之前先跑了"的竞态。
+   */
+  terminating: boolean
+  /**
+   * online() 入口预 load 的 creds，给 openSocket 复用，避免重复 L2 GET。
+   * openSocket 拿走后置 null。reconnect 流程会重新读以拿最新 creds。
+   */
+  cachedCreds: Record<string, unknown> | null
 }
 
 export interface AccountManagerDeps {
@@ -91,28 +113,64 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
 
   /** ───── 公开 API（routes 层调用） ───── */
 
-  /** 上线（已有 creds），ws connect 异步发生，事件回调由 event-bridge 推 */
-  async online(accountId: string, proxy: ProxyBinding, vipHint?: boolean, browser?: SocketBrowser): Promise<void> {
-    let ctx = this.accounts.get(accountId)
-    if (!ctx) {
-      // 如果 store 里已经有 creds（导入 / reconciler adopt / 重启恢复），
-      // 起点为 OFFLINE（"有身份但当前不在线"）；
-      // 否则是全新账号（pairing/QR 首次绑定），起点为 IMPORTED。
-      const hasCreds = await this.deps.credsStore.has(accountId)
-      const initialState: AccountState = hasCreds ? 'OFFLINE' : 'IMPORTED'
-      ctx = this.createContext(accountId, proxy, vipHint, initialState, browser)
-    } else {
-      // 已存在：更新代理绑定，准备重建
-      ctx.proxy = proxy
-      if (browser) ctx.browser = browser
+  /**
+   * 上线（已有 creds），ws connect 异步发生，事件回调由 event-bridge 推。
+   *
+   * @param source 调用来源，用于 metric 切片：
+   *   'api'        = 业务方直接调 /online
+   *   'batch'      = 批量上线接口
+   *   'reconciler' = AssignmentReconciler 接管账号
+   *   'failover'   = master 迁移
+   */
+  async online(
+    accountId: string,
+    proxy: ProxyBinding,
+    vipHint?: boolean,
+    browser?: SocketBrowser,
+    source: 'api' | 'batch' | 'reconciler' | 'failover' = 'api'
+  ): Promise<void> {
+    const started = Date.now()
+    this.deps.metrics.onlineInflight.inc()
+    let result: 'ok' | 'error' = 'ok'
+    try {
+      let ctx = this.accounts.get(accountId)
+      if (!ctx) {
+        // 如果 store 里已经有 creds（导入 / reconciler adopt / 重启恢复），
+        // 起点为 OFFLINE（"有身份但当前不在线"）；否则是全新账号（pairing/QR 首次绑定），
+        // 起点为 IMPORTED。
+        //
+        // 注意：这里用 credsStore.load 一次，把结果传给 openSocket 复用，
+        // 避免 openSocket 内再 load 一次（旧版有重复 IO）。
+        const credsLoaded = await this.deps.credsStore.load(accountId)
+        const initialState: AccountState = credsLoaded ? 'OFFLINE' : 'IMPORTED'
+        ctx = this.createContext(accountId, proxy, vipHint, initialState, browser)
+        ctx.cachedCreds = credsLoaded ?? null
+      } else {
+        // 已存在：更新代理绑定，准备重建
+        ctx.proxy = proxy
+        if (browser) ctx.browser = browser
+        ctx.cachedCreds = null // 强制重读，避免使用上一次握手前的旧 creds
+      }
+      await this.deps.runtimeStore.clear(accountId)
+      await this.openSocket(ctx)
+    } catch (err) {
+      result = 'error'
+      throw err
+    } finally {
+      this.deps.metrics.onlineInflight.dec()
+      this.deps.metrics.onlineTotal.inc({ source, result })
+      this.deps.metrics.onlineDurationSec.observe(
+        { source, result },
+        (Date.now() - started) / 1000
+      )
     }
-    await this.deps.runtimeStore.clear(accountId)
-    await this.openSocket(ctx)
   }
 
   /** 主动下线，保留 creds */
   async offline(accountId: string): Promise<void> {
     const ctx = this.requireCtx(accountId)
+    // 先标记 terminating，再 end()，避免 close 事件先于 cleanup 跑进 handleConnectionUpdate
+    ctx.terminating = true
     this.reconnect.cancel(accountId)
     if (ctx.sock) {
       try {
@@ -139,6 +197,7 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
   /** logout：远端踢自己 */
   async logout(accountId: string): Promise<void> {
     const ctx = this.requireCtx(accountId)
+    ctx.terminating = true
     if (ctx.sock) {
       try {
         await ctx.sock.logout()
@@ -243,10 +302,11 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
     }
 
     this.logger.warn({ accountId, state: ctx.state.state }, 'pairing timeout — releasing slot')
+    ctx.terminating = true
     await this.deps.publisher.publish('pairing.failed', accountId, {
       reason: 'user_timeout',
       failedAt: new Date().toISOString()
-    })
+    }).catch(err => this.logger.warn({ err, accountId }, 'publish pairing.failed err'))
     // 释放运行槽位 + 解除 Registry 绑定（账号没绑成功）
     this.publishStateChange(ctx, 'OFFLINE', 'pairing_timeout')
     await this.releaseRuntimeSlot(ctx, 'OFFLINE', 'pairing_timeout')
@@ -270,7 +330,9 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
       lastDateRecv: new Date(lastRecv || Date.now()).toISOString(),
       lastPingAckAt: new Date(ctx.lastPingAckAt || Date.now()).toISOString(),
       ageMs: Date.now() - (lastRecv || Date.now()),
-      keepAliveIntervalMs: this.deps.config.worker.keepAliveIntervalMs
+      keepAliveIntervalMs: ctx.keepAliveIntervalMs,
+      keepAliveJitterMinMs: this.deps.config.worker.keepAliveJitterMinMs,
+      keepAliveJitterMaxMs: this.deps.config.worker.keepAliveJitterMaxMs
     }
   }
 
@@ -352,15 +414,18 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
       proxy,
       proxyAgents: null,
       sock: null,
-      detachEventBridge: null,
+      detachers: [],
       state: new StateMachine(accountId, initialState),
       lastDateRecv: 0,
       lastPingAckAt: 0,
+      keepAliveIntervalMs: this.pickKeepAliveIntervalMs(accountId),
       wsOpenedAt: 0,
       detection: null,
       vipHint,
       browser,
-      pairingTimer: null
+      pairingTimer: null,
+      terminating: false,
+      cachedCreds: null
     }
     this.accounts.set(accountId, ctx)
     this.deps.metrics.accountsByState.inc({ state: initialState })
@@ -378,11 +443,17 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
     // 清旧 sock
     this.cleanupSocket(ctx)
 
+    // openSocket 期间，明确不是 terminating（reconnect/online 都走这里）
+    ctx.terminating = false
+
     // 构造 proxy agent（每次都新构造，避免连接池复用导致 IP 没切到）
     ctx.proxyAgents = createProxyAgents(ctx.proxy)
 
-    // 准备 auth state
-    const credsLoaded = (await this.deps.credsStore.load(ctx.accountId)) ?? initAuthCreds()
+    // 准备 auth state（优先用 online() 入口预 load 的，避免重复 L2 GET）
+    const credsLoaded = ctx.cachedCreds
+      ?? (await this.deps.credsStore.load(ctx.accountId))
+      ?? initAuthCreds()
+    ctx.cachedCreds = null // 一次性使用，下次 openSocket 重读
     const { state, saveCreds } = await buildAuthState(
       ctx.accountId,
       this.deps.credsStore,
@@ -396,20 +467,22 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
     )
 
     // 构造 socket
+    ctx.keepAliveIntervalMs = this.pickKeepAliveIntervalMs(ctx.accountId)
     const sock = createBaileysSocket({
       accountId: ctx.accountId,
       auth: state,
       proxy: ctx.proxyAgents,
       config: this.deps.config,
       logger: this.deps.logger,
-      browser: ctx.browser
+      browser: ctx.browser,
+      keepAliveIntervalMs: ctx.keepAliveIntervalMs
     })
     ctx.sock = sock
     ctx.wsOpenedAt = Date.now()
     this.publishStateChange(ctx, 'VERIFYING', 'ws_open')
 
-    // 接 Baileys 内部事件 → Kafka
-    ctx.detachEventBridge = attachEventBridge(
+    // 接 Baileys 内部事件 → Kafka（解绑函数存到 detachers）
+    const detachEventBridge = attachEventBridge(
       sock,
       {
         accountId: ctx.accountId,
@@ -420,19 +493,38 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
       this.logger,
       this.deps.metrics
     )
+    ctx.detachers.push(detachEventBridge)
 
     // 接 creds.update 持久化
-    sock.ev.on('creds.update', () => {
+    const credsHandler = (): void => {
+      if (ctx.terminating) return
       saveCreds().catch(err =>
         this.logger.error({ err, accountId: ctx.accountId }, 'saveCreds failed')
       )
+    }
+    sock.ev.on('creds.update', credsHandler)
+    ctx.detachers.push(() => {
+      try {
+        sock.ev.off('creds.update', credsHandler)
+      } catch {
+        // ignore
+      }
     })
 
     // 接 connection.update 做状态机
-    sock.ev.on('connection.update', update => {
+    const connHandler = (update: { connection?: string; lastDisconnect?: { error?: unknown }; qr?: string }): void => {
+      if (ctx.terminating) return
       this.handleConnectionUpdate(ctx, update).catch(err =>
         this.logger.error({ err, accountId: ctx.accountId }, 'handleConnectionUpdate failed')
       )
+    }
+    sock.ev.on('connection.update', connHandler)
+    ctx.detachers.push(() => {
+      try {
+        sock.ev.off('connection.update', connHandler)
+      } catch {
+        // ignore
+      }
     })
   }
 
@@ -494,6 +586,30 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
       if (translation.rawCode) {
         this.deps.metrics.waErrorTotal.inc({ code: String(translation.rawCode) })
       }
+      if (translation.semantic === 'PROXY_FAILED') {
+        this.deps.metrics.proxyFailedTotal.inc()
+      }
+
+      // 识别 libsignal 类错误（decrypt/encrypt/badMac/badSession/...）
+      // 这些不应该走 metric.disconnectTotal 的 semantic 标签，单独计一份，
+      // 用于发现 corrupted creds / keys 漂移问题（生产上罕见但需要可见）
+      const lower = reason.toLowerCase()
+      if (
+        lower.includes('signal') ||
+        lower.includes('badmac') ||
+        lower.includes('decrypt') ||
+        lower.includes('ratchet')
+      ) {
+        const kind = lower.includes('decrypt')
+          ? 'decrypt'
+          : lower.includes('encrypt')
+            ? 'encrypt'
+            : lower.includes('handshake')
+              ? 'handshake'
+              : 'unknown'
+        this.deps.metrics.libsignalErrorTotal.inc({ kind })
+        this.logger.warn({ accountId: ctx.accountId, reason, kind }, 'libsignal error detected')
+      }
 
       if (translation.needReauth) {
         this.publishStateChange(ctx, 'NEED_REAUTH', reason, translation)
@@ -554,20 +670,30 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
         },
         'business audit'
       )
-      this.deps.publisher.publish('account.state_changed', ctx.accountId, t, this.getEvidence(ctx.accountId))
+      // publish 是 fire-and-forget（state transition 不能因为 Kafka 抖动而阻塞），
+      // 但必须显式 .catch 防 unhandledRejection 把进程拽掉
+      void this.deps.publisher
+        .publish('account.state_changed', ctx.accountId, t, this.getEvidence(ctx.accountId))
+        .catch(publishErr =>
+          this.logger.warn(
+            { err: publishErr, accountId: ctx.accountId, target },
+            'publish account.state_changed failed (event dropped to DLQ inside publisher)'
+          )
+        )
     } catch (err) {
       this.logger.warn({ err, accountId: ctx.accountId, from: fromState, to: target }, 'invalid state transition')
     }
   }
 
   private cleanupSocket(ctx: AccountContext): void {
-    if (ctx.detachEventBridge) {
+    // 跑所有 detacher（event-bridge + creds.update + connection.update）
+    const fns = ctx.detachers.splice(0)
+    for (const fn of fns) {
       try {
-        ctx.detachEventBridge()
+        fn()
       } catch {
         // ignore
       }
-      ctx.detachEventBridge = null
     }
     if (ctx.proxyAgents) {
       destroyProxyAgents(ctx.proxyAgents)
@@ -596,6 +722,17 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
     // 由心跳的硬同步（每小时 force=true）兜底纠正即可。
     // 真正释放 load 由 unassign / logout / handlePairingTimeout 主动触发。
     this.logger.info({ accountId: ctx.accountId, state: ctx.state.state, reason }, 'runtime slot released')
+  }
+
+  private pickKeepAliveIntervalMs(accountId: string): number {
+    const min = Math.max(1_000, this.deps.config.worker.keepAliveJitterMinMs)
+    const max = Math.max(min, this.deps.config.worker.keepAliveJitterMaxMs)
+    let hash = 0x811c9dc5
+    for (let i = 0; i < accountId.length; i++) {
+      hash ^= accountId.charCodeAt(i)
+      hash = Math.imul(hash, 0x01000193) >>> 0
+    }
+    return min + (hash % (max - min + 1))
   }
 }
 

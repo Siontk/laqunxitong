@@ -49,6 +49,8 @@ KAFKA_TOPIC_OWNER=protocol.owner.events.v1
 KAFKA_TOPIC_MESSAGE=protocol.message.events.v1
 KAFKA_TOPIC_GROUP=protocol.group.events.v1
 KAFKA_TOPIC_PAIRING=protocol.pairing.events.v1
+KAFKA_TOPIC_DLQ=protocol.dlq.v1
+KAFKA_MAX_INFLIGHT_MESSAGES=2000
 ```
 
 如果 MSK 使用 SASL/SCRAM：
@@ -106,7 +108,13 @@ Kafka message key 固定为 `accountId`。功能层必须按 key 分区消费，
 - 消费失败不要丢，进入功能层自己的 DLQ。
 - owner 事件优先级最高，影响后续 HTTP 直连地址。
 
-协议层 Kafka producer 禁止自动创建 topic。联调前必须先创建 5 个业务 topic；发布失败会写入协议层本地文件 DLQ：`EVENT_DLQ_DIR/YYYY-MM-DD.jsonl`。
+协议层 Kafka producer 禁止自动创建 topic。联调前必须先创建 5 个主业务 topic：account、owner、message、group、pairing。`KAFKA_TOPIC_DLQ` 是预留的 Kafka DLQ topic；当前发布失败主路径仍写本地文件 DLQ：`EVENT_DLQ_DIR/YYYY-MM-DD.jsonl`，需要挂持久盘并做磁盘告警。
+
+如果 Kafka broker 不可用或 producer 未 ack 消息超过 `KAFKA_MAX_INFLIGHT_MESSAGES`，协议层会把后续事件写本地 DLQ，避免 Node heap 被 producer queue 撑爆。功能层联调时需要同时观察：
+
+- Kafka topic 是否有事件。
+- 协议层 `EVENT_DLQ_DIR` 是否出现 jsonl。
+- Prometheus 里 Kafka publish error / inflight 指标是否持续升高。
 
 ### 3.3 Owner Cache 消费逻辑
 
@@ -116,6 +124,16 @@ Kafka message key 固定为 `accountId`。功能层必须按 key 分区消费，
 account.owner_assigned   set owner cache
 account.owner_changed    update owner cache
 account.owner_unassigned delete owner cache
+```
+
+`account.owner_assigned.data.reason` 取值包括：
+
+```text
+pairing_code     Pairing Code 登录分配
+qr               二维码登录分配
+import           导入账号分配
+online           单账号 online 触发分配
+batch_online     批量 online/batch 触发分配
 ```
 
 账号状态/异常建议消费：
@@ -218,6 +236,110 @@ Authorization: Bearer {apiKey}
 ownerCache.set(accountId, details.ownerEndpoint)
 retry once on details.ownerEndpoint
 ```
+
+### 4.4 批量上线 owner redispatch
+
+2000 账号同时上线、主动下线后批量恢复、换机房恢复时，不要并发打 2000 次单账号 `/online`。功能层应调用：
+
+```http
+POST /v1/accounts/online/batch
+```
+
+请求：
+
+```json
+{
+  "items": [
+    { "accountId": "acc_001" },
+    { "accountId": "acc_002" }
+  ],
+  "maxWaitMs": 60000
+}
+```
+
+响应：
+
+```json
+{
+  "requestedAt": "2026-05-25T12:00:00.000Z",
+  "elapsedMs": 43000,
+  "summary": {
+    "requested": 2,
+    "local": 1,
+    "remote": 1,
+    "accepted": 1,
+    "timeout": 0,
+    "proxyRequired": 0,
+    "error": 0
+  },
+  "results": [
+    { "accountId": "acc_001", "result": "accepted" }
+  ],
+  "remote": [
+    {
+      "accountId": "acc_002",
+      "ownerWorkerId": "worker-002",
+      "ownerEndpoint": "http://10.0.1.13:8082",
+      "note": "redispatch to ownerEndpoint"
+    }
+  ]
+}
+```
+
+功能层处理规则：
+
+1. `results[].result=accepted` 表示协议层已发起上线，最终状态等 `account.state_changed ONLINE`。
+2. `timeout` 表示该账号没在 `maxWaitMs` 内拿到 OnlineGate 令牌，业务层按 `retryAfterMs` 或指数退避重试。
+3. `proxy_required` 表示账号没有绑定代理，先调 `/proxy/bind` 或在下一次 batch item 里带 `proxy`。
+4. `remote[]` 必须按 `ownerEndpoint` 分组，再调用 `POST {ownerEndpoint}/v1/accounts/online/batch`。
+5. `ownerEndpoint=null` 时先 resolve 纠偏，仍为空则延迟重试，不要盲打所有 worker。
+
+单账号 `/online` 返回 `429 ONLINE_LIMITED` 时，错误详情会带：
+
+```json
+{
+  "code": "ONLINE_LIMITED",
+  "details": {
+    "reason": "node_online_limited",
+    "retryAfterMs": 5000,
+    "cooldownUntil": "2026-05-25T12:00:05.000Z"
+  }
+}
+```
+
+批量场景遇到这个错误，应切换到 `/online/batch`，不要在功能层堆高并发重试。
+
+### 4.5 批量下线 owner redispatch
+
+功能层暂停任务、维护窗口、批量释放在线容量时，调用：
+
+```http
+POST /v1/accounts/offline/batch
+```
+
+请求：
+
+```json
+{
+  "accountIds": ["acc_001", "acc_002"],
+  "reason": "task_pause",
+  "maxWaitMs": 30000
+}
+```
+
+语义：
+
+- 只断开 socket，释放 worker runtime slot。
+- 保留 creds / keys / proxy / Registry owner 绑定。
+- 不是 logout，不会从 WhatsApp 已关联设备中移除。
+- 后续再次 `/online` 或 `/online/batch` 不需要重新授权。
+
+功能层处理：
+
+1. `offline` 和 `already_offline` 都可展示为离线。
+2. `remote[]` 按 `ownerEndpoint` 分组后调用 `POST {ownerEndpoint}/v1/accounts/offline/batch`。
+3. `not_found` 表示 Registry 没有 owner，可展示未知/离线，按业务决定是否 resolve。
+4. `error` 延迟重试或人工排查。
 
 ## 5. 账号接入流程
 

@@ -120,13 +120,20 @@ export class MySqlStoreAdapter<TValue> implements StoreAdapter<TValue> {
   }
 }
 
-export function createMySqlPool(uri: string): Pool {
+export interface MySqlPoolOptions {
+  connectionLimit?: number
+  maxIdle?: number
+  idleTimeoutMs?: number
+  connectTimeoutMs?: number
+}
+
+export function createMySqlPool(uri: string, options?: MySqlPoolOptions): Pool {
   return mysql.createPool({
     uri,
-    connectionLimit: 20,
-    maxIdle: 10,
-    idleTimeout: 30_000,
-    connectTimeout: 5_000,
+    connectionLimit: options?.connectionLimit ?? 8,
+    maxIdle: options?.maxIdle ?? 4,
+    idleTimeout: options?.idleTimeoutMs ?? 30_000,
+    connectTimeout: options?.connectTimeoutMs ?? 5_000,
     waitForConnections: true,
     enableKeepAlive: true,
     keepAliveInitialDelay: 0

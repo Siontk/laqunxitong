@@ -228,6 +228,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/online/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 批量上线 — 单次最多 500 账号
+         * @description 竞品级"主动下线后批量重新拉起"专用接口。
+         *
+         *     协议层会：
+         *       1. 一次性批量解析所有 accountId 的 owner（hmget 单次），按 ownerEndpoint 分桶
+         *       2. 非本节点的部分在响应 `remote[]` 数组中返回，业务侧分发到对应 endpoint 再调
+         *       3. 本节点的部分通过 **OnlineGate 三层令牌桶**节奏化处理：
+         *          - 单账号冷却：`accountOnlineCooldownMs`（默认 5s）
+         *          - 单节点速率：`nodeOnlinePerSec`（默认 50/s）
+         *          - 集群级速率：`globalOnlinePerSec`（默认 200/s）
+         *       4. 拿到令牌后异步并行 Noise 握手，避免 libsignal CPU 同时打 2000 个握手卡死 event loop
+         *
+         *     **吞吐预估**（4C8G 单节点 × 50/s 闸门）：
+         *       - 2000 账号通过闸门 ~ 40s
+         *       - Noise 握手并行 + WA 接受 ~ 500ms-2s
+         *       - 端到端 ~ 60-90s 全部 ONLINE
+         *       - 对齐竞品 2 分钟 baseline
+         *
+         *     **失败处理**：
+         *       - `timeout`：token 等待超时（>= maxWaitMs），业务侧下次重试
+         *       - `proxy_required`：账号未绑代理且 body 没传，先调 /proxy/bind
+         *       - `error`：协议层异常，看 `error` 字段定位
+         */
+        post: operations["batchOnlineAccounts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{accountId}/offline": {
         parameters: {
             query?: never;
@@ -237,8 +277,42 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 主动下线，保留 creds */
+        /**
+         * 主动下线，保留 creds
+         * @description 断开当前账号 socket，释放 worker runtime slot，保留 creds / keys / proxy / Registry owner 绑定。
+         *     后续再次调用 `/v1/accounts/{accountId}/online` 或 `/v1/accounts/online/batch` 不需要重新授权。
+         *     这不是 WhatsApp logout，也不会从已关联设备中移除。
+         */
         post: operations["offlineAccount"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/offline/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 批量下线，保留 creds
+         * @description 批量断开账号 socket，释放 worker runtime slot，但保留 creds / keys / proxy / Registry owner 绑定。
+         *     该接口适合功能层暂停任务、维护窗口、批量释放在线容量。
+         *
+         *     协议层会先批量解析 owner：
+         *       - 当前 worker owner 的账号本地下线；
+         *       - 非本 worker owner 的账号放入 `remote[]`，功能层按 `ownerEndpoint` 分组后继续调用；
+         *       - 未分配 owner 的账号返回 `not_found`。
+         *
+         *     注意：批量下线不是 logout。再次上线不需要 Pairing Code / QR，除非账号已经进入
+         *     `NEED_REAUTH` / `LOGGED_OUT` / `DEVICE_REMOVED`。
+         */
+        post: operations["batchOfflineAccounts"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1946,7 +2020,7 @@ export interface webhooks {
         };
         get?: never;
         put?: never;
-        /** 稳态心跳（30s/次） */
+        /** 账号级 Kafka 心跳（默认关闭；开启后默认 300s/次） */
         post: {
             parameters: {
                 query?: never;
@@ -2047,7 +2121,7 @@ export interface webhooks {
                         ownerEndpoint?: string | null;
                         currentWorkerId?: string;
                         /** @enum {string} */
-                        reason?: "pairing_code" | "qr" | "import" | "online";
+                        reason?: "pairing_code" | "qr" | "import" | "online" | "batch_online";
                         /** Format: date-time */
                         assignedAt?: string;
                     };
@@ -2134,7 +2208,7 @@ export interface webhooks {
                         currentWorkerId?: string | null;
                         releaseSlot?: boolean | null;
                         /** @enum {string} */
-                        reason?: "admin_unassign" | "failover_no_live_worker" | "failover_no_capacity";
+                        reason?: "admin_unassign" | "failover_no_live_worker" | "failover_no_capacity" | "failover_reassign_failed";
                         /** Format: date-time */
                         unassignedAt?: string;
                     };
@@ -3234,8 +3308,15 @@ export interface components {
             /** Format: date-time */
             lastPingAckAt?: string;
             ageMs?: number;
-            /** @example 30000 */
+            /**
+             * @description 当前账号实际 socket keepalive 间隔；默认按 accountId 在 15000-20000ms 稳定打散
+             * @example 17342
+             */
             keepAliveIntervalMs?: number;
+            /** @example 15000 */
+            keepAliveJitterMinMs?: number;
+            /** @example 20000 */
+            keepAliveJitterMaxMs?: number;
             /** @description true 表示该账号当前不占 worker 在线容量 */
             slotReleased?: boolean;
             /** @description slotReleased 或状态变更原因 */
@@ -3269,7 +3350,7 @@ export interface components {
          */
         StateSource: "HEARTBEAT" | "MANUAL_REFRESH" | "TASK_REPORT" | "IMPORT" | "PAIRING" | "RECONNECT" | "UNKNOWN";
         /** @enum {string} */
-        ErrorCode: "OK" | "PRIVACY_BLOCKED" | "TIMEOUT" | "ALREADY_IN" | "GROUP_FULL" | "SERVER_ERROR" | "PROBE_TIMEOUT" | "REACHOUT_TIMELOCK" | "BANNED" | "LOGGED_OUT" | "PROXY_CHANGED" | "ACCOUNT_BUSY" | "WORKER_BUSY" | "RECONNECT_LIMITED" | "UNKNOWN";
+        ErrorCode: "OK" | "PRIVACY_BLOCKED" | "TIMEOUT" | "ALREADY_IN" | "GROUP_FULL" | "SERVER_ERROR" | "PROBE_TIMEOUT" | "REACHOUT_TIMELOCK" | "BANNED" | "LOGGED_OUT" | "PROXY_CHANGED" | "ACCOUNT_BUSY" | "WORKER_BUSY" | "RECONNECT_LIMITED" | "ONLINE_LIMITED" | "UNKNOWN";
         OnlineResult: {
             accountId: string;
             /** @example true */
@@ -3281,6 +3362,125 @@ export interface components {
              */
             syncedAt: string;
             routing: components["schemas"]["RoutingInfo"];
+        };
+        BatchOnlineItem: {
+            accountId: string;
+            proxy?: components["schemas"]["ProxyBinding"];
+            deviceProfile?: components["schemas"]["DeviceProfile"];
+            browserDisplay?: components["schemas"]["BrowserDisplay"];
+        };
+        BatchOnlineBody: {
+            /** @description 单次最多 500 个，超过返回 400（按 rateLimit.batchOnlineMaxSize 配置） */
+            items: components["schemas"]["BatchOnlineItem"][];
+            /**
+             * @description 单账号在 OnlineGate 三层令牌桶上的最长等待。超时账号返回 `timeout`，
+             *     业务侧下次重试。默认 60s，2000 账号在 50/s 节奏下 40s 完成排队，留 20s 余量。
+             * @default 60000
+             */
+            maxWaitMs: number;
+        };
+        BatchOnlineItemResult: {
+            accountId: string;
+            /**
+             * @description - `accepted`: 已经发起 Noise 握手，最终状态等 account.state_changed 事件
+             *     - `timeout`: 超过 maxWaitMs 还没拿到上线令牌
+             *     - `proxy_required`: 账号未绑代理且 body 未传
+             *     - `error`: 协议层异常，看 `error` 字段
+             * @enum {string}
+             */
+            result: "accepted" | "timeout" | "proxy_required" | "error";
+            retryAfterMs?: number | null;
+            error?: string | null;
+        };
+        BatchOnlineRemoteItem: {
+            accountId: string;
+            ownerWorkerId: string;
+            ownerEndpoint: string | null;
+            /** @example redispatch to ownerEndpoint */
+            note: string;
+        };
+        BatchOnlineSummary: {
+            requested: number;
+            /** @description 本节点持有 owner 的账号数 */
+            local: number;
+            /** @description 非本节点 owner，需业务侧再分发 */
+            remote: number;
+            accepted: number;
+            timeout: number;
+            proxyRequired: number;
+            error: number;
+        };
+        BatchOnlineResult: {
+            /** Format: date-time */
+            requestedAt: string;
+            /** @description 本次批量请求从入口到响应的端到端耗时 */
+            elapsedMs: number;
+            summary: components["schemas"]["BatchOnlineSummary"];
+            /** @description 本节点 owner 的账号逐个结果 */
+            results: components["schemas"]["BatchOnlineItemResult"][];
+            /**
+             * @description 非本节点 owner 的账号清单。业务侧按 ownerEndpoint 分组后递归调
+             *     `POST {ownerEndpoint}/v1/accounts/online/batch`，直到全部本地完成。
+             */
+            remote: components["schemas"]["BatchOnlineRemoteItem"][];
+        };
+        BatchOfflineBody: {
+            /** @description 单次最多 500 个账号 */
+            accountIds: string[];
+            /**
+             * @description 本次批量下线原因，仅用于审计和功能层展示
+             * @default manual
+             * @enum {string}
+             */
+            reason: "manual" | "task_pause" | "batch_pause" | "maintenance";
+            /**
+             * @description 预留 SLA 字段；当前本地下线为即时操作，远端账号通过 remote[] 交给功能层分发
+             * @default 30000
+             */
+            maxWaitMs: number;
+        };
+        BatchOfflineItemResult: {
+            accountId: string;
+            /**
+             * @description - `offline`: 已断开 socket 并释放 runtime slot
+             *     - `already_offline`: 已经不在 worker 运行态或 runtime 已释放
+             *     - `not_found`: Registry 未分配 owner
+             *     - `error`: 协议层异常，看 `error`
+             * @enum {string}
+             */
+            result: "offline" | "already_offline" | "not_found" | "error";
+            error?: string | null;
+        };
+        BatchOfflineRemoteItem: {
+            accountId: string;
+            ownerWorkerId: string;
+            ownerEndpoint: string | null;
+            /** @example redispatch to ownerEndpoint */
+            note: string;
+        };
+        BatchOfflineSummary: {
+            requested: number;
+            /** @description 本节点持有 owner 的账号数 */
+            local: number;
+            /** @description 非本节点 owner，需功能层再分发 */
+            remote: number;
+            offline: number;
+            alreadyOffline: number;
+            notFound: number;
+            error: number;
+        };
+        BatchOfflineResult: {
+            /** Format: date-time */
+            requestedAt: string;
+            elapsedMs: number;
+            summary: components["schemas"]["BatchOfflineSummary"];
+            /** @description 本节点 owner 账号和未分配账号的逐条结果 */
+            results: components["schemas"]["BatchOfflineItemResult"][];
+            /**
+             * @description 非本节点 owner 的账号清单。功能层按 ownerEndpoint 分组后递归调
+             *     `POST {ownerEndpoint}/v1/accounts/offline/batch`。
+             */
+            remote: components["schemas"]["BatchOfflineRemoteItem"][];
         };
         ReconnectBody: {
             /**
@@ -4590,6 +4790,63 @@ export interface operations {
                     "application/json": components["schemas"]["OnlineResult"];
                 };
             };
+            /** @description 缺少代理绑定 (`PROXY_REQUIRED`) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description 上线限流命中（OnlineGate 三层令牌桶）。`details.reason` 可能为：
+             *       - `account_online_cooldown`：单账号冷却中
+             *       - `node_online_limited`：单节点 nodeOnlinePerSec 超限
+             *       - `global_online_limited`：集群级 globalOnlinePerSec 超限
+             *     `details.retryAfterMs` 告知功能层多久后再试；批量上线建议改用 `/v1/accounts/online/batch`。
+             */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    batchOnlineAccounts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BatchOnlineBody"];
+            };
+        };
+        responses: {
+            /** @description 批量上线请求处理完成（不代表全部成功，看 summary 与 results） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchOnlineResult"];
+                };
+            };
+            /** @description 参数错误 / 超出 batchOnlineMaxSize */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     offlineAccount: {
@@ -4610,6 +4867,39 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    batchOfflineAccounts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BatchOfflineBody"];
+            };
+        };
+        responses: {
+            /** @description 批量下线请求处理完成（看 summary 与 results） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchOfflineResult"];
+                };
+            };
+            /** @description 参数错误 / 超出单批上限 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
             };
         };
     };

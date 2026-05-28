@@ -6,7 +6,7 @@
  *   - markOnlineOnConnect = false
  *   - fireInitQueries = false（业务侧不依赖 app-state 同步则关）
  *   - emitOwnEvents = false
- *   - keepAliveIntervalMs = 30_000
+ *   - keepAliveIntervalMs = 15_000-20_000 per-account jitter
  *   - agent + fetchAgent 必须都传
  *   - **不要写 printQRInTerminal**（7.x 已废弃）
  */
@@ -25,6 +25,7 @@ export interface SocketFactoryInput {
   config: Config
   logger: Logger
   browser?: SocketBrowser
+  keepAliveIntervalMs?: number
 }
 
 export function createBaileysSocket(input: SocketFactoryInput): WASocket {
@@ -43,7 +44,7 @@ export function createBaileysSocket(input: SocketFactoryInput): WASocket {
     emitOwnEvents: config.baileys.emitOwnEvents,
     connectTimeoutMs: config.baileys.connectTimeoutMs,
     defaultQueryTimeoutMs: config.baileys.defaultQueryTimeoutMs,
-    keepAliveIntervalMs: config.worker.keepAliveIntervalMs,
+    keepAliveIntervalMs: input.keepAliveIntervalMs ?? config.worker.keepAliveIntervalMs,
     browser
   })
 }
