@@ -112,9 +112,26 @@ export interface RedisClientOptions {
   connectTimeoutMs?: number
 }
 
+function isRedisClusterUrl(url: string): boolean {
+  return url.includes(',') || /^rediss?:\/\/clustercfg\./i.test(url)
+}
+
+function parseRedisClusterNodes(url: string): Array<{ host: string; port: number }> {
+  const protocol = url.startsWith('rediss://') ? 'rediss:' : 'redis:'
+  return url
+    .replace(/^rediss?:\/\//, '')
+    .split(',')
+    .map(s => {
+      const u = new URL(`${protocol}//${s}`)
+      return { host: u.hostname, port: Number(u.port || 6379) }
+    })
+}
+
 /**
  * 构造 Redis 客户端（单机或 cluster）。
- * 集群模式下 URL 格式：redis://host1:port1,host2:port2,host3:port3
+ * 集群模式下 URL 格式：
+ *   - redis://host1:port1,host2:port2,host3:port3
+ *   - rediss://clustercfg.xxx.cache.amazonaws.com:6379
  *
  * 默认参数针对单点测试环境调好：
  *   - commandTimeout=5s → Redis 慢命令不会让业务路径卡死
@@ -148,21 +165,18 @@ export function createRedis(
     return false
   }
 
-  if (url.includes(',')) {
-    const nodes = url
-      .replace(/^redis:\/\//, '')
-      .split(',')
-      .map(s => {
-        const [host, port] = s.split(':')
-        return { host: host ?? 'localhost', port: Number(port ?? 6379) }
-      })
+  const useTls = url.startsWith('rediss://')
+
+  if (isRedisClusterUrl(url)) {
+    const nodes = parseRedisClusterNodes(url)
     return new Redis.Cluster(nodes, {
       redisOptions: {
         db,
         commandTimeout,
         maxRetriesPerRequest,
         connectTimeout,
-        reconnectOnError
+        reconnectOnError,
+        ...(useTls ? { tls: {} } : {})
       },
       clusterRetryStrategy: retryStrategy,
       enableOfflineQueue: true,
