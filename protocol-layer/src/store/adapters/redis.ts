@@ -169,14 +169,14 @@ export function createRedis(
 
   if (isRedisClusterUrl(url)) {
     const nodes = parseRedisClusterNodes(url)
+    const tls = useTls ? { servername: nodes[0]?.host } : undefined
     return new Redis.Cluster(nodes, {
       redisOptions: {
-        db,
         commandTimeout,
         maxRetriesPerRequest,
         connectTimeout,
         reconnectOnError,
-        ...(useTls ? { tls: {} } : {})
+        ...(tls ? { tls } : {})
       },
       clusterRetryStrategy: retryStrategy,
       enableOfflineQueue: true,
