@@ -185,6 +185,10 @@ servers:
   - url: /
     description: 当前 Swagger 访问地址（测试/部署环境自动沿用当前域名和端口）
 
+security:
+  - ApiKeyAuth: []
+  - BearerAuth: []
+
 tags:
   - name: auth
     description: |
@@ -2347,6 +2351,20 @@ paths:
 
 
 components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: |
+        协议层接口鉴权。Swagger 测试时点击 Authorize 后填入 `API_KEYS` 中任一 key。
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API key
+      description: |
+        等价鉴权方式：`Authorization: Bearer <API_KEY>`。
+
   parameters:
     AccountIdPath:
       in: path
