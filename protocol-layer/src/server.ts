@@ -7,6 +7,7 @@
  */
 
 import Fastify from 'fastify'
+import type { FastifyInstance } from 'fastify'
 import Sensible from '@fastify/sensible'
 import Swagger from '@fastify/swagger'
 import SwaggerUi from '@fastify/swagger-ui'
@@ -250,10 +251,10 @@ async function main(): Promise<void> {
 
   // ── Fastify ──
   const app = Fastify({
-    logger: logger as never,
+    loggerInstance: logger,
     bodyLimit: config.http.bodyLimitBytes,
     requestIdLogLabel: 'reqId'
-  })
+  }) as unknown as FastifyInstance
   await app.register(Sensible)
   await app.register(Swagger, {
     mode: 'static',
