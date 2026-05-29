@@ -43,6 +43,7 @@ export function translateDisconnect(
   reason: string | undefined,
   hint?: { isProxyError?: boolean; isRateLimited?: boolean }
 ): SemanticTranslation {
+  const lowerReason = (reason ?? '').toLowerCase()
   if (hint?.isProxyError) {
     return {
       semantic: 'PROXY_FAILED',
@@ -79,7 +80,23 @@ export function translateDisconnect(
     case DisconnectReason.forbidden: // 403
       return { semantic: 'NEED_REAUTH', reconnectClass: 'C', needReauth: true, rawCode: 403, rawReason: reason ?? 'forbidden' }
     case DisconnectReason.badSession: // 500
-      return { semantic: 'NEED_REAUTH', reconnectClass: 'C', needReauth: true, rawCode: 500, rawReason: 'bad session' }
+      if (
+        lowerReason.includes('bad session') ||
+        lowerReason.includes('badsession') ||
+        lowerReason.includes('invalid session') ||
+        lowerReason.includes('logged out') ||
+        lowerReason.includes('not-authorized') ||
+        lowerReason.includes('not authorized')
+      ) {
+        return { semantic: 'NEED_REAUTH', reconnectClass: 'C', needReauth: true, rawCode: 500, rawReason: reason ?? 'bad session' }
+      }
+      return {
+        semantic: 'RECONNECTING',
+        reconnectClass: 'A',
+        needReauth: false,
+        rawCode: 500,
+        rawReason: reason ?? 'socket closed'
+      }
     case DisconnectReason.unavailableService: // 503
       return { semantic: 'RECONNECTING', reconnectClass: 'B', needReauth: false, rawCode: 503, rawReason: 'unavailable service' }
     default:
