@@ -69,6 +69,8 @@ interface AccountContext {
   state: StateMachine
   lastDateRecv: number
   lastPingAckAt: number
+  connectionField: 'open' | 'close' | 'connecting'
+  lastDisconnectReason: string | null
   keepAliveIntervalMs: number
   wsOpenedAt: number
   detection: BusinessDetection | null
@@ -325,14 +327,15 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
     const ctx = this.requireCtx(accountId)
     const lastRecv = ctx.lastDateRecv
     return {
-      wsOpen: ctx.sock != null,
-      connectionField: 'open' as 'open' | 'close' | 'connecting',
+      wsOpen: ctx.connectionField === 'open',
+      connectionField: ctx.connectionField,
       lastDateRecv: new Date(lastRecv || Date.now()).toISOString(),
       lastPingAckAt: new Date(ctx.lastPingAckAt || Date.now()).toISOString(),
       ageMs: Date.now() - (lastRecv || Date.now()),
       keepAliveIntervalMs: ctx.keepAliveIntervalMs,
       keepAliveJitterMinMs: this.deps.config.worker.keepAliveJitterMinMs,
-      keepAliveJitterMaxMs: this.deps.config.worker.keepAliveJitterMaxMs
+      keepAliveJitterMaxMs: this.deps.config.worker.keepAliveJitterMaxMs,
+      lastDisconnectReason: ctx.lastDisconnectReason
     }
   }
 
@@ -418,6 +421,8 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
       state: new StateMachine(accountId, initialState),
       lastDateRecv: 0,
       lastPingAckAt: 0,
+      connectionField: 'close',
+      lastDisconnectReason: null,
       keepAliveIntervalMs: this.pickKeepAliveIntervalMs(accountId),
       wsOpenedAt: 0,
       detection: null,
@@ -479,6 +484,8 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
     })
     ctx.sock = sock
     ctx.wsOpenedAt = Date.now()
+    ctx.connectionField = 'connecting'
+    ctx.lastDisconnectReason = null
     this.publishStateChange(ctx, 'VERIFYING', 'ws_open')
 
     // 接 Baileys 内部事件 → Kafka（解绑函数存到 detachers）
@@ -537,6 +544,8 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
     ctx.lastPingAckAt = Date.now()
 
     if (update.connection === 'open') {
+      ctx.connectionField = 'open'
+      ctx.lastDisconnectReason = null
       // 检测账号类型（首次 online 或重新刷新）
       const detection = await detectAccountType(
         {
@@ -577,6 +586,8 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
       const error = update.lastDisconnect?.error as Boom | undefined
       const statusCode = error?.output?.statusCode
       const reason = error?.message ?? 'unknown'
+      ctx.connectionField = 'close'
+      ctx.lastDisconnectReason = reason
       const translation = translateDisconnect(statusCode, reason)
 
       this.deps.metrics.disconnectTotal.inc({
@@ -704,6 +715,7 @@ export class AccountManager implements ReconnectExecutor, StaleObserver {
       ctx.pairingTimer = null
     }
     ctx.sock = null
+    ctx.connectionField = 'close'
   }
 
   private async releaseRuntimeSlot(ctx: AccountContext, state: AccountState, reason: string): Promise<void> {

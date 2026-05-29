@@ -141,10 +141,9 @@ export async function createEventPublisher(
     await p.send({
       topic: topicFor(envelope.event),
       acks: -1,
-      // GZIP/LZ4/Snappy 都能用，LZ4 综合速度最快。AWS MSK 默认开 LZ4。
-      // 2000 账号 message.received + state_changed 这类高频事件压缩比能到 5-10x，
-      // 节省 broker 入向带宽和 broker 端磁盘 IO。
-      compression: CompressionTypes.LZ4,
+      // KafkaJS 默认未注册 LZ4 codec；测试/MSK 环境先禁用压缩，避免事件落 DLQ。
+      // 后续如需压缩，显式引入 codec 后再切 gzip/snappy/lz4。
+      compression: CompressionTypes.None,
       messages: [
         {
           key: envelope.accountId,

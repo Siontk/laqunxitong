@@ -3317,6 +3317,8 @@ export interface components {
             keepAliveJitterMinMs?: number;
             /** @example 20000 */
             keepAliveJitterMaxMs?: number;
+            /** @description 最近一次 Baileys connection.update close 的错误原因；为 null 表示暂无断线记录 */
+            lastDisconnectReason?: string | null;
             /** @description true 表示该账号当前不占 worker 在线容量 */
             slotReleased?: boolean;
             /** @description slotReleased 或状态变更原因 */

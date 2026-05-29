@@ -2412,6 +2412,10 @@ components:
           description: 当前账号实际 socket keepalive 间隔；默认按 accountId 在 15000-20000ms 稳定打散
         keepAliveJitterMinMs: { type: integer, example: 15000 }
         keepAliveJitterMaxMs: { type: integer, example: 20000 }
+        lastDisconnectReason:
+          type: string
+          nullable: true
+          description: 最近一次 Baileys connection.update close 的错误原因；为 null 表示暂无断线记录
         slotReleased:
           type: boolean
           description: true 表示该账号当前不占 worker 在线容量
