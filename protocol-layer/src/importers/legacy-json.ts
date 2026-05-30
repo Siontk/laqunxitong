@@ -13,6 +13,7 @@
  */
 
 import type { ConvertOutput, LegacyJsonLoginInput } from './types.js'
+import { reviveJsonBuffers } from '../utils/buffer-json.js'
 
 interface LegacyJsonV1 {
   // 已观察到的几种旧字段命名（覆盖 malaixiya 历史协议）
@@ -99,28 +100,31 @@ export function convertLegacyJsonToBaileys(input: LegacyJsonLoginInput): Convert
   const isFullCreds = !!(sigPreKey?.keyPair?.private && sigPreKey?.signature && regId !== undefined)
   const hasKeys = !!(json.keys && Object.keys(json.keys).length > 0)
 
-  const creds: Record<string, unknown> = {
+  const creds: Record<string, unknown> = reviveJsonBuffers({
     noiseKey,
     signedIdentityKey: sigIdKey,
     signedPreKey: sigPreKey,
     registrationId: regId ?? 0,
     advSecretKey: advSecret ?? '',
-    nextPreKeyId: 1,
-    firstUnuploadedPreKeyId: 1,
-    accountSyncCounter: 0,
-    accountSettings: { unarchiveChats: false },
-    deviceId: '',
-    phoneId: '',
-    identityId: '',
-    registered: true,
-    backupToken: '',
+    nextPreKeyId: json.nextPreKeyId ?? 1,
+    firstUnuploadedPreKeyId: json.firstUnuploadedPreKeyId ?? 1,
+    accountSyncCounter: json.accountSyncCounter ?? 0,
+    accountSettings: json.accountSettings ?? { unarchiveChats: false },
+    deviceId: json.deviceId ?? '',
+    phoneId: json.phoneId ?? '',
+    identityId: json.identityId ?? '',
+    registered: json.registered ?? true,
+    backupToken: json.backupToken ?? '',
     me: json.me ?? { id: `${wid}@s.whatsapp.net` },
     account: json.account ?? null,
-    signalIdentities: [],
-    platform: 'android',
-    lastAccountSyncTimestamp: 0,
-    myAppStateKeyId: ''
-  }
+    signalIdentities: json.signalIdentities ?? [],
+    platform: json.platform ?? 'android',
+    pairingEphemeralKeyPair: json.pairingEphemeralKeyPair,
+    routingInfo: json.routingInfo,
+    lastAccountSyncTimestamp: json.lastAccountSyncTimestamp ?? 0,
+    lastPropHash: json.lastPropHash,
+    myAppStateKeyId: json.myAppStateKeyId ?? ''
+  }) as Record<string, unknown>
 
   const warnings: string[] = []
   if (!isFullCreds) warnings.push('signedPreKey or registrationId missing in legacy JSON')
@@ -129,7 +133,7 @@ export function convertLegacyJsonToBaileys(input: LegacyJsonLoginInput): Convert
   return {
     result: isFullCreds && hasKeys ? 'CONVERTED_FULL' : 'CONVERTED_PARTIAL',
     creds,
-    keys: hasKeys ? json.keys : {},
+    keys: hasKeys ? reviveJsonBuffers(json.keys) : {},
     warnings,
     meta: { source: 'legacy_json', inputFieldsPresent: present, inputFieldsMissing: [] }
   }

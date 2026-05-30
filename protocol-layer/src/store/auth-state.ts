@@ -19,6 +19,7 @@ import type {
 import type { CredsStore } from './creds-store.js'
 import type { KeysStore, KeyType } from './keys-store.js'
 import type { Logger } from '../observability/logger.js'
+import { reviveJsonBuffers } from '../utils/buffer-json.js'
 
 const KEY_TYPES: KeyType[] = [
   'pre-key',
@@ -37,10 +38,10 @@ export async function buildAuthState(
   initial?: { creds?: Partial<AuthenticationCreds>; keys?: SignalDataSet }
 ): Promise<{ state: AuthenticationState; saveCreds: () => Promise<void> }> {
   // 初始化 creds：优先 initial > store > 全新
-  let creds = (await credsStore.load(accountId)) as AuthenticationCreds | null
+  let creds = reviveJsonBuffers((await credsStore.load(accountId)) as AuthenticationCreds | null)
 
   if (initial?.creds) {
-    creds = { ...(creds ?? {}), ...initial.creds } as AuthenticationCreds
+    creds = reviveJsonBuffers({ ...(creds ?? {}), ...initial.creds } as AuthenticationCreds)
     await credsStore.save(accountId, creds as Record<string, unknown>)
   }
 
@@ -75,7 +76,7 @@ export async function buildAuthState(
         const map = await keysStore.getMany(accountId, type as KeyType, ids)
         const result: { [id: string]: SignalDataTypeMap[T] } = {}
         for (const [id, v] of Object.entries(map)) {
-          if (v != null) result[id] = v as SignalDataTypeMap[T]
+          if (v != null) result[id] = reviveJsonBuffers(v) as SignalDataTypeMap[T]
         }
         return result
       },
